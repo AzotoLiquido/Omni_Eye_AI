@@ -1,0 +1,377 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/schemas/assistant.schema.json",
+  "title": "Local Assistant Configuration Schema",
+  "type": "object",
+  "required": ["meta", "runtime", "persona", "policies", "memory", "tools", "orchestration", "logging"],
+  "additionalProperties": false,
+
+  "properties": {
+    "meta": {
+      "type": "object",
+      "required": ["name", "version", "created_at"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "description": { "type": "string" },
+        "locale": { "type": "string", "default": "it-IT" }
+      }
+    },
+
+    "runtime": {
+      "type": "object",
+      "required": ["engine", "model", "limits"],
+      "additionalProperties": false,
+      "properties": {
+        "engine": {
+          "type": "string",
+          "enum": ["local_llm", "openai_api", "other_api"]
+        },
+        "model": {
+          "type": "object",
+          "required": ["id"],
+          "additionalProperties": false,
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "endpoint": { "type": "string" },
+            "api_key_env": { "type": "string" },
+            "temperature": { "type": "number", "minimum": 0, "maximum": 2, "default": 0.4 },
+            "top_p": { "type": "number", "minimum": 0, "maximum": 1, "default": 1 },
+            "seed": { "type": "integer" }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "required": ["max_tokens_out", "context_tokens", "tool_timeout_ms"],
+          "additionalProperties": false,
+          "properties": {
+            "max_tokens_out": { "type": "integer", "minimum": 128, "default": 1024 },
+            "context_tokens": { "type": "integer", "minimum": 2048, "default": 8192 },
+            "tool_timeout_ms": { "type": "integer", "minimum": 100, "default": 45000 },
+            "max_tool_calls": { "type": "integer", "minimum": 0, "default": 12 }
+          }
+        }
+      }
+    },
+
+    "persona": {
+      "type": "object",
+      "required": ["style", "language", "output_format"],
+      "additionalProperties": false,
+      "properties": {
+        "style": {
+          "type": "object",
+          "required": ["tone", "verbosity", "formatting"],
+          "additionalProperties": false,
+          "properties": {
+            "tone": { "type": "string", "enum": ["terminal", "neutro", "amichevole", "formale"], "default": "terminal" },
+            "verbosity": { "type": "integer", "minimum": 0, "maximum": 10, "default": 2 },
+            "formatting": {
+              "type": "object",
+              "required": ["use_lists", "use_tables"],
+              "additionalProperties": false,
+              "properties": {
+                "use_lists": { "type": "boolean", "default": true },
+                "use_tables": { "type": "boolean", "default": false },
+                "code_fences": { "type": "boolean", "default": true }
+              }
+            }
+          }
+        },
+        "language": {
+          "type": "object",
+          "required": ["primary", "avoid_english_terms"],
+          "additionalProperties": false,
+          "properties": {
+            "primary": { "type": "string", "default": "it-IT" },
+            "avoid_english_terms": { "type": "boolean", "default": true },
+            "glossary": {
+              "type": "object",
+              "additionalProperties": { "type": "string" },
+              "description": "Mappa termini inglesi -> equivalenti italiani (es. 'deploy' -> 'pubblicazione')"
+            }
+          }
+        },
+        "output_format": {
+          "type": "object",
+          "required": ["default"],
+          "additionalProperties": false,
+          "properties": {
+            "default": { "type": "string", "enum": ["markdown", "testo", "json"], "default": "markdown" },
+            "terminal_prefix": { "type": "string", "default": "> " }
+          }
+        }
+      }
+    },
+
+    "policies": {
+      "type": "object",
+      "required": ["safety", "privacy", "web_access"],
+      "additionalProperties": false,
+      "properties": {
+        "safety": {
+          "type": "object",
+          "required": ["refuse_categories"],
+          "additionalProperties": false,
+          "properties": {
+            "refuse_categories": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "malware",
+                  "phishing",
+                  "credential_theft",
+                  "weapons",
+                  "self_harm",
+                  "extremism"
+                ]
+              },
+              "default": ["malware", "phishing", "credential_theft"]
+            },
+            "redact_secrets": { "type": "boolean", "default": true },
+            "allow_shell_write": { "type": "boolean", "default": false }
+          }
+        },
+        "privacy": {
+          "type": "object",
+          "required": ["store_conversations", "pii_handling"],
+          "additionalProperties": false,
+          "properties": {
+            "store_conversations": { "type": "boolean", "default": true },
+            "pii_handling": {
+              "type": "string",
+              "enum": ["minimize", "allow", "strict_redaction"],
+              "default": "minimize"
+            },
+            "data_paths_allowlist": {
+              "type": "array",
+              "items": { "type": "string" },
+              "default": ["./workspace", "./notes"]
+            }
+          }
+        },
+        "web_access": {
+          "type": "object",
+          "required": ["enabled", "allowed_domains"],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "allowed_domains": { "type": "array", "items": { "type": "string" }, "default": [] },
+            "blocked_domains": { "type": "array", "items": { "type": "string" }, "default": [] }
+          }
+        }
+      }
+    },
+
+    "memory": {
+      "type": "object",
+      "required": ["provider", "schemas", "retrieval"],
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": ["sqlite", "jsonl", "postgres", "none"],
+          "default": "sqlite"
+        },
+        "storage": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "path": { "type": "string", "default": "./data/memory.sqlite" },
+            "encryption": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean", "default": false },
+                "key_env": { "type": "string" }
+              }
+            }
+          }
+        },
+        "schemas": {
+          "type": "object",
+          "required": ["facts", "tasks", "documents"],
+          "additionalProperties": false,
+          "properties": {
+            "facts": { "$ref": "#/$defs/memory_collection" },
+            "tasks": { "$ref": "#/$defs/memory_collection" },
+            "documents": { "$ref": "#/$defs/memory_collection" }
+          }
+        },
+        "retrieval": {
+          "type": "object",
+          "required": ["mode", "top_k"],
+          "additionalProperties": false,
+          "properties": {
+            "mode": { "type": "string", "enum": ["keyword", "vector", "hybrid"], "default": "hybrid" },
+            "top_k": { "type": "integer", "minimum": 1, "maximum": 50, "default": 8 },
+            "min_score": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.2 },
+            "chunking": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "max_chars": { "type": "integer", "minimum": 500, "default": 2000 },
+                "overlap_chars": { "type": "integer", "minimum": 0, "default": 200 }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "tools": {
+      "type": "object",
+      "required": ["registry"],
+      "additionalProperties": false,
+      "properties": {
+        "registry": {
+          "type": "array",
+          "minItems": 0,
+          "items": { "$ref": "#/$defs/tool_definition" }
+        },
+        "routing": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "default_policy": { "type": "string", "enum": ["never", "auto", "always"], "default": "auto" },
+            "per_tool_policy": {
+              "type": "object",
+              "additionalProperties": { "type": "string", "enum": ["never", "auto", "always"] }
+            }
+          }
+        }
+      }
+    },
+
+    "orchestration": {
+      "type": "object",
+      "required": ["planner", "execution"],
+      "additionalProperties": false,
+      "properties": {
+        "planner": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "strategy": { "type": "string", "enum": ["simple", "react", "tree_of_thought"], "default": "react" },
+            "max_steps": { "type": "integer", "minimum": 1, "maximum": 50, "default": 12 },
+            "stop_on_refusal": { "type": "boolean", "default": true }
+          }
+        },
+        "execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "sandbox": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean", "default": true },
+                "fs_root": { "type": "string", "default": "./workspace" },
+                "network": { "type": "string", "enum": ["off", "on", "restricted"], "default": "off" }
+              }
+            },
+            "confirmations": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "required_for": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": ["file_write", "file_delete", "shell_exec", "network_access"]
+                  },
+                  "default": ["file_delete", "shell_exec", "network_access"]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "logging": {
+      "type": "object",
+      "required": ["level", "paths", "audit"],
+      "additionalProperties": false,
+      "properties": {
+        "level": { "type": "string", "enum": ["debug", "info", "warn", "error"], "default": "info" },
+        "paths": {
+          "type": "object",
+          "required": ["events", "conversations"],
+          "additionalProperties": false,
+          "properties": {
+            "events": { "type": "string", "default": "./logs/events.jsonl" },
+            "conversations": { "type": "string", "default": "./logs/conversations.jsonl" }
+          }
+        },
+        "audit": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "log_prompts": { "type": "boolean", "default": false },
+            "log_tool_io": { "type": "boolean", "default": true }
+          }
+        }
+      }
+    }
+  },
+
+  "$defs": {
+    "memory_collection": {
+      "type": "object",
+      "required": ["name", "fields"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "fields": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/field" }
+        }
+      }
+    },
+    "field": {
+      "type": "object",
+      "required": ["name", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "type": { "type": "string", "enum": ["string", "number", "boolean", "datetime", "json"] },
+        "indexed": { "type": "boolean", "default": false },
+        "encrypted": { "type": "boolean", "default": false }
+      }
+    },
+    "tool_definition": {
+      "type": "object",
+      "required": ["id", "type", "enabled", "capabilities"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9_\\-]+$" },
+        "type": { "type": "string", "enum": ["shell", "python", "http", "filesystem", "db", "custom"] },
+        "enabled": { "type": "boolean", "default": true },
+        "capabilities": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": []
+        },
+        "policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "requires_confirmation": { "type": "boolean", "default": false },
+            "allow_write": { "type": "boolean", "default": false },
+            "allow_network": { "type": "boolean", "default": false }
+          }
+        },
+        "config": {
+          "type": "object",
+          "description": "Configurazione specifica del tool (varia per type)",
+          "additionalProperties": true
+        }
+      }
+    }
+  }
+}

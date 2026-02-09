@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Omni Eye AI - Assistente Locale</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <!-- Sidebar -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <h1>🤖 Omni Eye AI</h1>
+                <button id="newChatBtn" class="btn-new-chat" aria-label="Crea nuova conversazione">+ Nuova Chat</button>
+            </div>
+            
+            <div class="conversations-list" id="conversationsList">
+                <!-- Lista conversazioni caricata via JS -->
+            </div>
+            
+            <div class="sidebar-footer">
+                <div class="status-indicator" id="statusIndicator" role="status" aria-live="polite" aria-atomic="true">
+                    <span class="status-dot" aria-hidden="true"></span>
+                    <span class="status-text">Verifica...</span>
+                </div>
+                <div class="model-info" id="modelInfo">
+                    <select id="modelSelect" class="model-select">
+                        <option value="">Carica modelli...</option>
+                    </select>
+                </div>
+                <a href="/knowledge" class="btn-knowledge" target="_blank" title="Visualizza Knowledge Base" aria-label="Apri Knowledge Base in nuova scheda">
+                    🧠 Knowledge Base
+                </a>
+            </div>
+        </aside>
+        <button id="sidebarToggle" class="sidebar-toggle" title="Chiudi sidebar" aria-label="Chiudi/Apri barra laterale" aria-expanded="true">◀</button>
+
+        <!-- Main Chat Area -->
+        <main class="chat-area">
+            <div class="chat-header">
+                <h2 id="chatTitle">Benvenuto in Omni Eye AI</h2>
+                <div class="header-badges">
+                    <span class="header-badge" title="Tutto resta sul tuo PC">🔒 Privato</span>
+                    <span class="header-badge" title="Nessun costo o limite">⚡ Illimitato</span>
+                    <span class="header-badge" title="Analizza PDF, DOCX, TXT">📄 Documenti</span>
+                    <span class="header-badge" title="Analisi visiva con modelli multimodali">👁️ Vision</span>
+                    <span class="header-badge" title="Ricorda le conversazioni">💾 Memoria</span>
+                </div>
+            </div>
+
+            <div class="messages-container" id="messagesContainer">
+                <div class="welcome-message">
+                    <div class="welcome-logo"><img src="/static/emoji_occhio.png" alt="eye"></div>
+                    <h1 class="glitch" data-text="OMNI EYE AI">OMNI EYE AI</h1>
+                    <p class="welcome-tagline">Sistema AI locale &bull; Privato &bull; Illimitato</p>
+                </div>
+            </div>
+
+            <div class="input-area">
+                <div class="quick-prompts" id="quickPrompts">
+                    <button class="quick-prompt" data-prompt="Spiegami come funziona l'intelligenza artificiale">⚡ Come funziona l'AI?</button>
+                    <button class="quick-prompt" data-prompt="Aiutami a scrivere un programma Python">🐍 Programma Python</button>
+                    <button class="quick-prompt" data-prompt="Quali sono le novità tecnologiche del 2026?">🔮 Novità tech 2026</button>
+                    <button class="quick-prompt" data-prompt="Raccontami una storia interessante">📖 Racconta una storia</button>
+                </div>
+                <div class="file-preview" id="filePreview" style="display: none;">
+                    <div class="file-preview-content">
+                        <span class="file-name" id="fileName"></span>
+                        <button class="file-remove" id="fileRemove">✕</button>
+                    </div>
+                </div>
+                <div class="image-preview" id="imagePreview" style="display: none;">
+                    <div class="image-preview-content">
+                        <img id="imageThumb" src="" alt="Anteprima immagine" class="image-thumb">
+                        <span class="image-name" id="imageName"></span>
+                        <button class="file-remove" id="imageRemove">✕</button>
+                    </div>
+                </div>
+                <div class="input-container">
+                    <input type="file" id="fileInput" accept=".txt,.pdf,.docx,.md,.py,.js,.html,.css,.json" style="display: none;" aria-label="Carica file documento">
+                    <input type="file" id="imageInput" accept="image/*" style="display: none;" aria-label="Carica immagine">
+                    <label for="messageInput" class="sr-only">Inserisci il tuo messaggio</label>
+                    <textarea 
+                        id="messageInput" 
+                        placeholder="enter command... [ENTER to execute]"
+                        rows="1"
+                        aria-label="Campo input messaggio"
+                    ></textarea>
+                    <button id="sendBtn" class="btn-send" disabled aria-label="Invia messaggio" aria-disabled="true">
+                        <span class="send-icon" aria-hidden="true">➤</span>
+                    </button>
+                </div>
+                <div class="chat-actions">
+                    <button id="uploadBtn" class="btn-icon" title="Carica documento" aria-label="Carica documento">📎 Documento</button>
+                    <button id="imageBtn" class="btn-icon" title="Carica immagine per analisi visiva" aria-label="Carica immagine">🖼️ Immagine</button>
+                    <button id="quickPromptsToggle" class="btn-icon" title="Suggerimenti rapidi" aria-label="Mostra suggerimenti rapidi" aria-expanded="false">💡 Suggerimenti</button>
+                    <button id="clearBtn" class="btn-icon" title="Pulisci chat" aria-label="Pulisci conversazione attuale">🗑️ Pulisci chat</button>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

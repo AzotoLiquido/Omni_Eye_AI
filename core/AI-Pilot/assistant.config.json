@@ -1,0 +1,140 @@
+{
+  "$schema": "./assistant.schema.json",
+  "meta": {
+    "name": "Omni Eye AI",
+    "version": "2.0.0",
+    "description": "Assistente AI locale potenziato con AI-Pilot",
+    "author": "Omni Eye Team"
+  },
+  "runtime": {
+    "engine": "ollama",
+    "model_id": "llama3",
+    "temperature": 0.7,
+    "max_tokens": 2048,
+    "context_window": 4096,
+    "streaming": true
+  },
+  "persona": {
+    "tone": "friendly",
+    "verbosity": "normal",
+    "language": "it",
+    "fallback_language": "en",
+    "custom_instructions": "Sei Omni Eye AI, un assistente intelligente e versatile. Rispondi in modo chiaro e utile."
+  },
+  "policies": {
+    "safety": {
+      "block_prompt_injection": true,
+      "redact_secrets": true,
+      "max_tool_calls_per_turn": 5
+    },
+    "output": {
+      "max_response_length": 4000,
+      "format": "markdown",
+      "include_sources": true,
+      "include_confidence": false
+    }
+  },
+  "memory": {
+    "enabled": true,
+    "backend": "sqlite",
+    "db_path": "data/pilot_memory.db",
+    "collections": {
+      "facts": {
+        "description": "Fatti appresi dall'utente",
+        "max_entries": 1000,
+        "ttl_days": null,
+        "fields": [
+          { "name": "key", "type": "string", "indexed": true },
+          { "name": "value", "type": "string", "indexed": true },
+          { "name": "source", "type": "string", "indexed": false }
+        ]
+      },
+      "tasks": {
+        "description": "Task e promemoria",
+        "max_entries": 500,
+        "ttl_days": 90,
+        "fields": [
+          { "name": "title", "type": "string", "indexed": true },
+          { "name": "status", "type": "string", "indexed": true },
+          { "name": "due_at", "type": "string", "indexed": false }
+        ]
+      },
+      "documents": {
+        "description": "Documenti indicizzati per RAG",
+        "max_entries": 5000,
+        "ttl_days": null,
+        "fields": [
+          { "name": "source_path", "type": "string", "indexed": true },
+          { "name": "chunk", "type": "string", "indexed": true },
+          { "name": "tags", "type": "string", "indexed": true }
+        ]
+      }
+    }
+  },
+  "tools": [
+    {
+      "id": "fs",
+      "name": "Filesystem",
+      "description": "Leggi, scrivi e lista file nel workspace",
+      "enabled": true,
+      "policy": "ask_user",
+      "parameters": {
+        "root": "./data",
+        "allowed_extensions": [".txt", ".md", ".json", ".py", ".csv", ".log"],
+        "max_file_size_kb": 500
+      }
+    },
+    {
+      "id": "py",
+      "name": "Python Executor",
+      "description": "Esegui codice Python in sandbox",
+      "enabled": true,
+      "policy": "auto",
+      "parameters": {
+        "timeout_seconds": 30,
+        "max_output_chars": 10000
+      }
+    },
+    {
+      "id": "sh",
+      "name": "Shell",
+      "description": "Esegui comandi shell (limitato)",
+      "enabled": false,
+      "policy": "ask_user",
+      "parameters": {
+        "allowed_commands": ["ls", "cat", "head", "tail", "wc", "grep", "find", "echo", "date"],
+        "timeout_seconds": 15
+      }
+    },
+    {
+      "id": "db",
+      "name": "Memory DB",
+      "description": "Cerca e gestisci la memoria persistente",
+      "enabled": true,
+      "policy": "auto",
+      "parameters": {}
+    }
+  ],
+  "orchestration": {
+    "planner": {
+      "strategy": "react",
+      "max_steps": 5,
+      "step_timeout_seconds": 60
+    },
+    "fallback": {
+      "on_tool_error": "report_and_continue",
+      "on_planner_error": "direct_response",
+      "max_retries": 2
+    }
+  },
+  "logging": {
+    "level": "info",
+    "audit": {
+      "enabled": true,
+      "log_prompts": false,
+      "log_tool_io": true,
+      "events_path": "./data/logs/pilot_events.jsonl",
+      "conversations_path": "./data/logs/pilot_conversations.jsonl"
+    }
+  }
+}
