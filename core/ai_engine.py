@@ -9,6 +9,9 @@ import config
 
 logger = logging.getLogger(__name__)
 
+# Client Ollama con host configurabile (supporto remoto)
+_ollama_client = ollama.Client(host=config.OLLAMA_HOST)
+
 
 class AIEngine:
     """Gestisce la comunicazione con i modelli AI locali tramite Ollama"""
@@ -20,6 +23,7 @@ class AIEngine:
         Args:
             model: Nome del modello da usare (default da config)
         """
+        self.client = _ollama_client
         self.model = model or config.AI_CONFIG['model']
         self.temperature = config.AI_CONFIG['temperature']
         self.max_tokens = config.AI_CONFIG['max_tokens']
@@ -27,7 +31,7 @@ class AIEngine:
     def check_ollama_available(self) -> bool:
         """Verifica se Ollama è disponibile e in esecuzione"""
         try:
-            ollama.list()
+            self.client.list()
             return True
         except Exception as e:
             logger.debug("Ollama non disponibile: %s", e)
@@ -36,7 +40,7 @@ class AIEngine:
     def check_model_available(self) -> bool:
         """Verifica se il modello configurato è scaricato"""
         try:
-            models = ollama.list()
+            models = self.client.list()
             model_names = [m.model for m in models.models]
             # Controlla se il modello o una sua variante è presente
             return any(self.model in name for name in model_names)
@@ -47,7 +51,7 @@ class AIEngine:
     def list_available_models(self) -> List[str]:
         """Restituisce la lista dei modelli disponibili"""
         try:
-            models = ollama.list()
+            models = self.client.list()
             return [m.model for m in models.models]
         except Exception as e:
             logger.warning("Impossibile listare modelli Ollama: %s", e)
@@ -99,7 +103,7 @@ class AIEngine:
             messages.append(user_msg)
             
             # Genera risposta
-            response = ollama.chat(
+            response = self.client.chat(
                 model=self.model,
                 messages=messages,
                 options={
@@ -152,7 +156,7 @@ class AIEngine:
             messages.append(user_msg)
             
             # Genera risposta in streaming
-            stream = ollama.chat(
+            stream = self.client.chat(
                 model=self.model,
                 messages=messages,
                 stream=True,

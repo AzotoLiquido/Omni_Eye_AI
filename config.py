@@ -32,6 +32,9 @@ AI_CONFIG = {
     'context_window': int(os.getenv('OLLAMA_CONTEXT_WINDOW', '4096')),
 }
 
+# Host Ollama (per uso remoto, es. da Termux verso PC)
+OLLAMA_HOST = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
+
 # Configurazione Server (da variabili d'ambiente con fallback)
 SERVER_CONFIG = {
     'host': os.getenv('HOST', '127.0.0.1'),
