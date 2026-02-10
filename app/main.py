@@ -341,8 +341,28 @@ def api_chat_stream():
             
         user_message = data.get('message', '').strip()
         conv_id = data.get('conversation_id')
-        images = data.get('images')  # Lista di stringhe base64 (per modelli vision)
-        
+        raw_images = data.get('images')  # Lista di stringhe base64 (per modelli vision)
+
+        # ── Validazione immagini (P0-2) ──
+        images = None
+        if raw_images:
+            if not isinstance(raw_images, list):
+                return jsonify({'error': 'images deve essere una lista'}), 400
+            images = []
+            for i, img in enumerate(raw_images[:5]):  # max 5 immagini
+                if not isinstance(img, str):
+                    return jsonify({'error': f'images[{i}]: deve essere una stringa base64'}), 400
+                # Limita dimensione singola immagine (10MB decodificati ~= 13.3MB base64)
+                if len(img) > 14_000_000:
+                    return jsonify({'error': f'images[{i}]: troppo grande (max ~10MB)'}), 400
+                # Controlla che sia base64 valido (campiona i primi bytes)
+                try:
+                    import base64 as _b64
+                    _b64.b64decode(img[:100], validate=True)
+                except Exception:
+                    return jsonify({'error': f'images[{i}]: base64 non valido'}), 400
+                images.append(img)
+
         logger.debug("Richiesta chat: message='%s...', conv_id=%s, images=%d",
                       user_message[:50], conv_id, len(images) if images else 0)
         
@@ -366,6 +386,7 @@ def api_chat_stream():
         history = history[:-1]
     
     # Estrai descrizioni immagini salvate nella conversazione (per follow-up)
+    # P2-2: tieni solo le ultime 3 analisi per non esplodere il contesto
     image_context_parts = []
     clean_history = []
     for msg in history:
@@ -373,6 +394,7 @@ def api_chat_stream():
             image_context_parts.append(msg['content'])
         else:
             clean_history.append(msg)
+    image_context_parts = image_context_parts[-3:]  # cap a 3 analisi più recenti
     image_memory = "\n".join(image_context_parts) if image_context_parts else ""
     
     # System prompt: Pilot (se attivo) oppure fallback
@@ -394,10 +416,11 @@ def api_chat_stream():
     def generate():
         """Generator per lo streaming"""
         full_response = ""
-        saved_model = ai_engine.model  # Salva sempre per ripristino
         
         try:
             # Auto-switch a modello vision se ci sono immagini
+            # P0-1: NON mutiamo più ai_engine.model/.temperature
+            #       usiamo variabili locali + parametri model=/temperature= nei metodi
             if images:
                 all_models = ai_engine.list_available_models()
                 vision_models = [m for m in all_models
@@ -415,14 +438,15 @@ def api_chat_stream():
                 is_vision = any(v in current for v in _VISION_PRIORITY)
 
                 if not is_vision and vision_models:
-                    ai_engine.model = vision_models[0]
-                    logger.info("Auto-switch a modello vision: %s", ai_engine.model)
+                    vision_model = vision_models[0]
+                    logger.info("Auto-switch a modello vision: %s", vision_model)
                 elif not is_vision and not vision_models:
                     yield f"data: ⚠️ Nessun modello vision installato. Scaricane uno con: ollama pull minicpm-v\n\n"
                     yield f"event: end\ndata: {conv_id}\n\n"
                     return
+                else:
+                    vision_model = ai_engine.model
 
-                vision_model = ai_engine.model
                 text_model = config.AI_CONFIG['model']
                 is_multilingual = any(tag in vision_model.lower()
                                       for tag in _MULTILINGUAL_VISION)
@@ -430,39 +454,37 @@ def api_chat_stream():
                 # --- Prompt adattivo in base alla domanda utente ---
                 vision_prompt = _build_vision_prompt(user_message, is_multilingual)
 
+                # System prompt condiviso per analisi visiva
+                _VISION_SYSTEM_PROMPT = (
+                    "# Ruolo\n"
+                    "Sei un analista visivo esperto. Il tuo compito è analizzare immagini "
+                    "con la massima precisione possibile.\n\n"
+                    "# Istruzioni\n"
+                    "1. Descrivi ESATTAMENTE ciò che vedi, senza inventare dettagli.\n"
+                    "2. Se c\'è testo visibile, trascrivilo fedelmente.\n"
+                    "3. Specifica posizioni spaziali (in alto, a sinistra, sullo sfondo...).\n"
+                    "4. Distingui ciò che è certo da ciò che è incerto (\"sembra\", \"potrebbe\").\n"
+                    "5. Rispondi nella lingua dell\'utente.\n"
+                    "6. NON aggiungere informazioni che non derivano dall\'immagine.\n"
+                    "7. Sii conciso ma completo. Non ripetere le stesse informazioni."
+                )
+
                 if is_multilingual:
                     # ═══ PIPELINE SINGOLA — modello multilingue ═══
-                    # Il modello vision risponde direttamente nella lingua
-                    # dell'utente, con l'immagine allegata. Niente fase 2.
                     logger.info("Vision pipeline SINGOLA (multilingual): %s", vision_model)
-
-                    # Temperatura bassa per massima accuratezza visiva
-                    saved_temp = ai_engine.temperature
-                    ai_engine.temperature = 0.2
 
                     direct_response = ""
                     for chunk in ai_engine.generate_response_stream(
                         vision_prompt,
-                        conversation_history=clean_history[-4:],  # ultimi 2 turni per contesto
-                        system_prompt=(
-                            "# Ruolo\n"
-                            "Sei un analista visivo esperto. Il tuo compito \u00e8 analizzare immagini "
-                            "con la massima precisione possibile.\n\n"
-                            "# Istruzioni\n"
-                            "1. Descrivi ESATTAMENTE ci\u00f2 che vedi, senza inventare dettagli.\n"
-                            "2. Se c'\u00e8 testo visibile, trascrivilo fedelmente.\n"
-                            "3. Specifica posizioni spaziali (in alto, a sinistra, sullo sfondo...).\n"
-                            "4. Distingui ci\u00f2 che \u00e8 certo da ci\u00f2 che \u00e8 incerto (\"sembra\", \"potrebbe\").\n"
-                            "5. Rispondi nella lingua dell'utente.\n"
-                            "6. NON aggiungere informazioni che non derivano dall'immagine."
-                        ),
+                        conversation_history=clean_history[-4:],
+                        system_prompt=_VISION_SYSTEM_PROMPT,
                         images=images,
+                        model=vision_model,
+                        temperature=0.2,
                     ):
                         direct_response += chunk
                         full_response += chunk
                         yield f"data: {chunk}\n\n"
-
-                    ai_engine.temperature = saved_temp
 
                     # Salva descrizione per follow-up
                     img_context = (
@@ -475,25 +497,28 @@ def api_chat_stream():
 
                 else:
                     # ═══ PIPELINE 2 FASI — modello EN-only ═══
-                    # Fase 1: descrizione inglese con modello vision
-                    # Fase 2: risposta nella lingua dell'utente via modello testo
                     logger.info("Vision pipeline 2 FASI (EN-only): %s -> %s",
                                 vision_model, text_model)
 
-                    saved_temp = ai_engine.temperature
-                    ai_engine.temperature = 0.15  # massima fedeltà per descrizione
+                    # P2-3: feedback utente durante fase 1
+                    yield "data: 🔍 *Analisi immagine in corso...*\n\n"
 
                     image_description = ""
                     for chunk in ai_engine.generate_response_stream(
                         vision_prompt,
                         conversation_history=None,
-                        system_prompt=None,
+                        # P1-3: system prompt anche per EN-only
+                        system_prompt=_VISION_SYSTEM_PROMPT,
                         images=images,
+                        model=vision_model,
+                        temperature=0.15,
                     ):
                         image_description += chunk
 
-                    ai_engine.temperature = saved_temp
                     logger.info("Vision fase 1 completata: %d chars", len(image_description))
+
+                    # Sostituisci il messaggio di progress
+                    yield "data: \n\n"
 
                     # Salva la descrizione nella conversazione per follow-up
                     img_context = (
@@ -504,9 +529,6 @@ def api_chat_stream():
                     memory.add_message_advanced(
                         conv_id, 'system', img_context, extract_entities=False
                     )
-
-                    # Fase 2 — risposta all'utente con modello testo
-                    ai_engine.model = text_model
 
                     answer_prompt = (
                         f"# Contesto\n"
@@ -526,6 +548,7 @@ def api_chat_stream():
                         answer_prompt,
                         conversation_history=clean_history,
                         system_prompt=config.SYSTEM_PROMPT,
+                        model=text_model,
                     ):
                         full_response += chunk
                         yield f"data: {chunk}\n\n"
@@ -559,9 +582,6 @@ def api_chat_stream():
             
         except Exception as e:
             yield f"event: error\ndata: {str(e)}\n\n"
-        finally:
-            # Ripristina sempre il modello che l'utente aveva selezionato
-            ai_engine.model = saved_model
     
     return Response(
         stream_with_context(generate()),

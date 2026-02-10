@@ -86,12 +86,35 @@ class AIEngine:
             logger.warning("Impossibile listare modelli Ollama: %s", e)
             return []
     
+    def _build_opts(
+        self,
+        images: List[str] = None,
+        *,
+        temperature: float = None,
+        max_tokens: int = None,
+    ) -> dict:
+        """Costruisce le opzioni Ollama per una singola richiesta (thread-safe)."""
+        temp = temperature if temperature is not None else self.temperature
+        tokens = max_tokens if max_tokens is not None else self.max_tokens
+        opts = {
+            'temperature': temp,
+            'num_predict': tokens,
+            'repeat_penalty': self.REPEAT_PENALTY,
+            'repeat_last_n': self.REPEAT_LAST_N,
+        }
+        if images:
+            opts['num_predict'] = min(opts['num_predict'], self.VISION_MAX_TOKENS)
+        return opts
+
     def generate_response(
         self, 
         prompt: str, 
         conversation_history: List[Dict] = None,
         system_prompt: str = None,
-        images: List[str] = None
+        images: List[str] = None,
+        *,
+        model: str = None,
+        temperature: float = None,
     ) -> str:
         """
         Genera una risposta dal modello AI
@@ -101,11 +124,15 @@ class AIEngine:
             conversation_history: Storico della conversazione
             system_prompt: Prompt di sistema personalizzato
             images: Lista di immagini codificate in base64 (per modelli vision)
+            model: Override modello per questa richiesta (thread-safe)
+            temperature: Override temperatura per questa richiesta (thread-safe)
             
         Returns:
             La risposta del modello
         """
         try:
+            use_model = model or self.model
+
             # Prepara i messaggi
             messages = []
             
@@ -130,23 +157,12 @@ class AIEngine:
             if images:
                 user_msg['images'] = images
             messages.append(user_msg)
-            
-            # Opzioni di generazione
-            opts = {
-                'temperature': self.temperature,
-                'num_predict': self.max_tokens,
-                'repeat_penalty': self.REPEAT_PENALTY,
-                'repeat_last_n': self.REPEAT_LAST_N,
-            }
-            # Cap più basso per modelli vision (tendono a degenerare)
-            if images:
-                opts['num_predict'] = min(opts['num_predict'], self.VISION_MAX_TOKENS)
 
             # Genera risposta
             response = self.client.chat(
-                model=self.model,
+                model=use_model,
                 messages=messages,
-                options=opts,
+                options=self._build_opts(images, temperature=temperature),
             )
             
             return response['message']['content']
@@ -160,7 +176,10 @@ class AIEngine:
         prompt: str, 
         conversation_history: List[Dict] = None,
         system_prompt: str = None,
-        images: List[str] = None
+        images: List[str] = None,
+        *,
+        model: str = None,
+        temperature: float = None,
     ) -> Generator[str, None, None]:
         """
         Genera una risposta in streaming (per visualizzare parola per parola)
@@ -170,11 +189,15 @@ class AIEngine:
             conversation_history: Storico della conversazione
             system_prompt: Prompt di sistema personalizzato
             images: Lista di immagini codificate in base64 (per modelli vision)
+            model: Override modello per questa richiesta (thread-safe)
+            temperature: Override temperatura per questa richiesta (thread-safe)
             
         Yields:
             Parti della risposta man mano che vengono generate
         """
         try:
+            use_model = model or self.model
+
             # Prepara i messaggi
             messages = []
             
@@ -191,39 +214,33 @@ class AIEngine:
             if images:
                 user_msg['images'] = images
             messages.append(user_msg)
-            
-            # Opzioni di generazione
-            opts = {
-                'temperature': self.temperature,
-                'num_predict': self.max_tokens,
-                'repeat_penalty': self.REPEAT_PENALTY,
-                'repeat_last_n': self.REPEAT_LAST_N,
-            }
-            if images:
-                opts['num_predict'] = min(opts['num_predict'], self.VISION_MAX_TOKENS)
 
             # Genera risposta in streaming
             stream = self.client.chat(
-                model=self.model,
+                model=use_model,
                 messages=messages,
                 stream=True,
-                options=opts,
+                options=self._build_opts(images, temperature=temperature),
             )
 
-            # Buffer circolare per rilevamento ripetizioni in tempo reale
+            # Rilevamento ripetizioni in tempo reale (controlla ogni N token)
             running_text = ""
+            _check_interval = 20   # controlla ogni N token, non ad ogni singolo
+            _token_count = 0
             for chunk in stream:
                 if 'message' in chunk and 'content' in chunk['message']:
                     token = chunk['message']['content']
                     running_text += token
+                    _token_count += 1
 
-                    # Guard anti-loop: se il modello sta ripetendo, taglia
-                    if len(running_text) > 200 and _detect_repetition(running_text):
+                    # Guard anti-loop: controlla periodicamente
+                    if (_token_count % _check_interval == 0
+                            and len(running_text) > 200
+                            and _detect_repetition(running_text)):
                         logger.warning(
                             "Ripetizione rilevata dopo %d chars, generazione interrotta",
                             len(running_text),
                         )
-                        # Emetti un avviso visivo opzionale
                         yield "\n\n⚠️ *Risposta troncata: il modello ha iniziato a ripetere.*"
                         return
 
