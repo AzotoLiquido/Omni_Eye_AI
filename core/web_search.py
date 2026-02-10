@@ -129,10 +129,18 @@ def format_search_results(results: List[Dict[str, str]], query: str = "") -> str
             + ". Informa l'utente che la ricerca non ha prodotto risultati."
         )
 
-    lines = ["[RICERCA WEB] I risultati di ricerca sono già stati mostrati all'utente."]
-    lines.append("NON ripetere i link. NON inventare URL. Limita la tua risposta a un")
-    lines.append("breve commento o consiglio utile riguardo la ricerca dell'utente.")
-    lines.append(f"L'utente cercava: {query}" if query else "")
+    lines = [
+        "[ISTRUZIONE PRIORITARIA — RICERCA WEB COMPLETATA]",
+        f"Una ricerca web per \"{query}\" è stata GIÀ ESEGUITA con successo." if query else "Una ricerca web è stata GIÀ ESEGUITA con successo.",
+        f"I {len(results)} risultati con link reali sono GIÀ STATI MOSTRATI all'utente sopra questo messaggio.",
+        "",
+        "Il tuo compito ORA:",
+        "- Rispondi con un BREVE commento utile sui risultati (es. quale link è più rilevante, un consiglio).",
+        "- NON dire che non puoi cercare online: la ricerca È GIÀ STATA FATTA.",
+        "- NON ripetere i link già mostrati.",
+        "- NON inventare link o URL aggiuntivi.",
+        "- NON dire 'mi dispiace' o 'non posso': i risultati ci sono già.",
+    ]
     return "\n".join(lines)
 
 

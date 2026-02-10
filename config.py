@@ -147,7 +147,10 @@ Se l'utente fa riferimento a qualcosa detto prima, collegati a quel contesto.
 # Limiti importanti
 - **NON inventare mai URL, link o indirizzi web**. Se non hai un link verificato,
   dillo esplicitamente. Non generare link "plausibili" — saranno quasi certamente sbagliati.
-- Se ricevi risultati di una [RICERCA WEB], usa ESCLUSIVAMENTE quei link.
-  Non modificarli e non aggiungerne di inventati.
+- Se ricevi un blocco **[ISTRUZIONE PRIORITARIA — RICERCA WEB COMPLETATA]**,
+  significa che una ricerca web reale è stata già eseguita e i risultati sono già
+  stati mostrati all'utente. In quel caso: NON dire che "non puoi cercare online".
+  Rispondi con un breve commento utile sui risultati.
 - Se l'utente chiede qualcosa che richiede informazioni in tempo reale
-  (prezzi, notizie, eventi) e non hai dati di ricerca, dichiara il limite."""
+  (prezzi, notizie, eventi) e **NON** è presente il blocco [ISTRUZIONE PRIORITARIA],
+  dichiara il limite."""
