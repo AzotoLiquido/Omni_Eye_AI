@@ -5,9 +5,10 @@ Fornisce ricerche web reali per evitare che il modello inventi link/URL.
 Usa DuckDuckGo: gratuito, senza API key, privacy-friendly.
 """
 
+import html
 import logging
 import re
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -113,9 +114,9 @@ def web_search(
         with DDGS() as ddgs:
             for r in ddgs.text(search_query, region=region, max_results=max_results):
                 results.append({
-                    "title": r.get("title", ""),
+                    "title": html.unescape(r.get("title", "")),
                     "url": r.get("href", ""),
-                    "snippet": r.get("body", ""),
+                    "snippet": html.unescape(r.get("body", "")),
                 })
         logger.info("Web search: %d risultati per '%s'", len(results), search_query[:60])
         return results
@@ -175,6 +176,36 @@ def format_search_results_user(results: List[Dict[str, str]], query: str = "") -
     return "\n".join(lines)
 
 
+# ── Post-filtro: rimuove URL inventati dal modello ─────────────────────
+_MD_LINK_RE = re.compile(r"\[([^\]]*?)\]\(https?://[^)]+\)")
+_BARE_URL_RE = re.compile(r"(?<!\()https?://[^\s)]+")  # Lookbehind: skip URLs inside markdown (
+
+
+def strip_hallucinated_urls(text: str, allowed_urls: Set[str]) -> str:
+    """
+    Rimuove dal testo ogni URL non presente in allowed_urls.
+
+    - Link Markdown [titolo](url) → mantiene solo il titolo
+    - URL bare (https://...) → rimosso
+    """
+    def _replace_md_link(m: re.Match) -> str:
+        # Estrai l'URL dal link markdown
+        full = m.group(0)
+        url_match = re.search(r"\((https?://[^)]+)\)", full)
+        if url_match and url_match.group(1) in allowed_urls:
+            return full  # URL reale, mantieni
+        return m.group(1)  # Solo il titolo, senza link
+
+    text = _MD_LINK_RE.sub(_replace_md_link, text)
+    text = _BARE_URL_RE.sub(
+        lambda m: m.group(0) if m.group(0) in allowed_urls else "",
+        text,
+    )
+    # Pulisci spazi doppi residui
+    text = re.sub(r"  +", " ", text)
+    return text
+
+
 def search_and_format(message: str, max_results: int = 5) -> Optional[str]:
     """
     Punto di ingresso principale: rileva se serve una ricerca,
@@ -197,5 +228,6 @@ def search_and_format(message: str, max_results: int = 5) -> Optional[str]:
     return {
         "user": format_search_results_user(results, query=message),
         "model": format_search_results(results, query=message),
+        "urls": {r["url"] for r in results if r.get("url")},
         "empty": len(results) == 0,
     }

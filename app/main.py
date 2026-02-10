@@ -197,8 +197,10 @@ def api_chat():
             )
             meta = {}
         
-        # Prependi risultati ricerca se presenti
+        # Filtra URL inventati dal modello e prependi risultati ricerca
         if web_search_data_sync:
+            from core.web_search import strip_hallucinated_urls
+            response = strip_hallucinated_urls(response, web_search_data_sync["urls"])
             response = web_search_data_sync["user"] + "\n\n" + response
         
         # Salva risposta (senza estrazione entità per l'assistant)
@@ -463,14 +465,30 @@ def api_chat_stream():
                     full_response += chunk
                     yield _sse_data(chunk)
             else:
-                for chunk in ai_engine.generate_response_stream(
-                    user_message, 
-                    conversation_history=clean_history,
-                    system_prompt=system_prompt,
-                    images=images,
-                ):
-                    full_response += chunk
-                    yield _sse_data(chunk)
+                # Se web_context: bufferizza la risposta del modello per
+                # filtrare eventuali URL inventati prima di inviarla.
+                if web_context:
+                    model_buf = ""
+                    for chunk in ai_engine.generate_response_stream(
+                        user_message,
+                        conversation_history=clean_history,
+                        system_prompt=system_prompt,
+                        images=images,
+                    ):
+                        model_buf += chunk
+                    from core.web_search import strip_hallucinated_urls
+                    model_buf = strip_hallucinated_urls(model_buf, web_search_data["urls"])
+                    full_response += model_buf
+                    yield _sse_data(model_buf)
+                else:
+                    for chunk in ai_engine.generate_response_stream(
+                        user_message, 
+                        conversation_history=clean_history,
+                        system_prompt=system_prompt,
+                        images=images,
+                    ):
+                        full_response += chunk
+                        yield _sse_data(chunk)
             
             # Salva la risposta completa
             memory.add_message_advanced(conv_id, 'assistant', full_response, extract_entities=False)
