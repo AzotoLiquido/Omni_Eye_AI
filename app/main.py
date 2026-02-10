@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core import AIEngine, DocumentProcessor
 from core.advanced_memory import AdvancedMemory
 from core.ai_pilot import Pilot
+from core.web_search import search_and_format
 from app.vision import (
     VISION_ONLY_TAGS, MULTILINGUAL_VISION, VISION_PRIORITY,
     VISION_SYSTEM_PROMPT, user_visible_models, vision_model_priority,
@@ -162,16 +163,24 @@ def api_chat():
     if history:
         history = history[:-1]
     
+    # ── Ricerca web automatica (se il messaggio lo richiede) ──
+    web_context = search_and_format(user_message)
+    
     # System prompt: Pilot (se attivo) oppure fallback config.py
     if PILOT_ENABLED and pilot:
+        extra = additional_context
+        if web_context:
+            extra = web_context + "\n" + (extra or "")
         system_prompt = pilot.build_system_prompt(
             user_message=user_message,
-            extra_instructions=additional_context,
+            extra_instructions=extra,
         )
     else:
         system_prompt = config.SYSTEM_PROMPT
         if additional_context:
             system_prompt = additional_context + "\n" + system_prompt
+        if web_context:
+            system_prompt = web_context + "\n" + system_prompt
     
     # Genera risposta
     try:
@@ -285,11 +294,16 @@ def api_chat_stream():
     image_context_parts = image_context_parts[-3:]  # cap a 3 analisi più recenti
     image_memory = "\n".join(image_context_parts) if image_context_parts else ""
     
+    # ── Ricerca web automatica (se il messaggio lo richiede) ──
+    web_context = search_and_format(user_message) if not images else None
+    
     # System prompt: Pilot (se attivo) oppure fallback
     if PILOT_ENABLED and pilot:
         extra = additional_context
         if image_memory:
             extra = image_memory + "\n" + (extra or "")
+        if web_context:
+            extra = web_context + "\n" + (extra or "")
         system_prompt = pilot.build_system_prompt(
             user_message=user_message,
             extra_instructions=extra,
@@ -300,6 +314,8 @@ def api_chat_stream():
             system_prompt = image_memory + "\n" + system_prompt
         if additional_context:
             system_prompt = additional_context + "\n" + system_prompt
+        if web_context:
+            system_prompt = web_context + "\n" + system_prompt
     
     def generate():
         """Generator per lo streaming"""
