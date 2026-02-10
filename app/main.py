@@ -95,12 +95,146 @@ def knowledge_page():
 
 
 # Modelli usati solo come backend per vision; nascosti dalla selezione utente
-_VISION_ONLY_TAGS = ('moondream', 'bakllava')
+_VISION_ONLY_TAGS = ('moondream', 'bakllava', 'minicpm-v')
+
+# Modelli vision multilingue: possono rispondere direttamente in qualsiasi lingua
+# → pipeline singola (no fase intermedia in inglese)
+_MULTILINGUAL_VISION = ('minicpm-v', 'llava:13b', 'llava-llama3')
+
+# Modelli vision EN-only: descrivono solo in inglese
+# → pipeline a 2 fasi (descrizione EN + risposta IT via modello testo)
+_EN_ONLY_VISION = ('moondream', 'bakllava', 'llava-phi3')
+
+# Ordine di priorità modelli vision (il primo disponibile viene usato)
+_VISION_PRIORITY = ('minicpm-v', 'llava:13b', 'llava-llama3', 'llava:7b',
+                    'llava', 'moondream', 'bakllava', 'vision')
 
 def _user_visible_models() -> list:
     """Restituisce solo i modelli selezionabili dall'utente (esclude vision-only)."""
     return [m for m in ai_engine.list_available_models()
             if not any(tag in m.lower() for tag in _VISION_ONLY_TAGS)]
+
+
+def _build_vision_prompt(user_message: str, multilingual: bool) -> str:
+    """Costruisce un prompt vision adattivo in base alla domanda dell'utente.
+
+    Analizza il contenuto della domanda per capire cosa l'utente vuole sapere
+    e genera un prompt specializzato (OCR, persone, scena, tecnico, ecc.).
+
+    Args:
+        user_message: La domanda dell'utente sull'immagine
+        multilingual: Se True, il prompt include istruzioni di lingua
+    """
+    msg = (user_message or "").lower()
+
+    # Rilevamento intento dalla domanda utente
+    ocr_keywords = ('testo', 'scritto', 'scritta', 'leggi', 'leggere', 'parole',
+                    'scrivi', 'text', 'read', 'ocr', 'lettere', 'titolo',
+                    'etichetta', 'label', 'caption', 'didascalia')
+    people_keywords = ('persona', 'persone', 'gente', 'viso', 'volto', 'faccia',
+                       'chi', 'uomo', 'donna', 'bambino', 'people', 'person',
+                       'face', 'who', 'espressione', 'emozione')
+    tech_keywords = ('codice', 'code', 'programma', 'errore', 'error', 'bug',
+                     'screenshot', 'schermo', 'screen', 'interfaccia', 'ui',
+                     'terminale', 'terminal', 'console', 'log')
+    food_keywords = ('cibo', 'piatto', 'mangiare', 'ricetta', 'ingredienti',
+                     'food', 'dish', 'recipe', 'cucina')
+    location_keywords = ('dove', 'luogo', 'posto', 'citt', 'paese', 'location',
+                         'where', 'edificio', 'building', 'strada', 'via')
+
+    has_ocr = any(k in msg for k in ocr_keywords)
+    has_people = any(k in msg for k in people_keywords)
+    has_tech = any(k in msg for k in tech_keywords)
+    has_food = any(k in msg for k in food_keywords)
+    has_location = any(k in msg for k in location_keywords)
+
+    # Costruisci prompt specializzato
+    parts = []
+
+    if multilingual:
+        # Per modelli multilingue: rispondi direttamente alla domanda dell'utente
+        if has_ocr:
+            parts.append(
+                "Analizza attentamente l'immagine e trascrivi TUTTO il testo visibile, "
+                "inclusi titoli, etichette, didascalie e qualsiasi scritta. "
+                "Mantieni la formattazione originale dove possibile."
+            )
+        elif has_tech:
+            parts.append(
+                "Analizza questo screenshot/interfaccia tecnica. "
+                "Identifica il tipo di applicazione, il linguaggio di programmazione se presente, "
+                "eventuali errori visibili, e descrivi i dettagli tecnici rilevanti."
+            )
+        elif has_people:
+            parts.append(
+                "Descrivi le persone presenti nell'immagine: quante sono, "
+                "il loro aspetto generale, espressioni, posizioni, "
+                "abbigliamento e cosa stanno facendo."
+            )
+        elif has_food:
+            parts.append(
+                "Analizza il cibo/piatto nell'immagine. Identifica gli ingredienti visibili, "
+                "il tipo di piatto, la presentazione e il contesto."
+            )
+        elif has_location:
+            parts.append(
+                "Descrivi il luogo mostrato nell'immagine: tipo di ambiente, "
+                "elementi architettonici, segnali o indicazioni di localizzazione, "
+                "atmosfera e dettagli rilevanti."
+            )
+        else:
+            parts.append(
+                "Descrivi tutto ciò che vedi nell'immagine nel modo più completo possibile."
+            )
+
+        if user_message and user_message.strip():
+            parts.append(f"\nDomanda specifica dell'utente: \"{user_message}\"")
+            parts.append("Rispondi nella stessa lingua della domanda.")
+        else:
+            parts.append("Rispondi in italiano.")
+
+    else:
+        # Per modelli EN-only: descrizione dettagliata in inglese
+        if has_ocr:
+            parts.append(
+                "Carefully examine this image and transcribe ALL visible text, "
+                "including titles, labels, captions, signs, and any writing. "
+                "Preserve the original formatting where possible."
+            )
+        elif has_tech:
+            parts.append(
+                "Analyze this screenshot or technical interface in detail. "
+                "Identify the application type, programming language if present, "
+                "any visible errors, UI elements, and technical details."
+            )
+        elif has_people:
+            parts.append(
+                "Describe the people in this image: how many, their general appearance, "
+                "expressions, positions, clothing, and what they are doing."
+            )
+        elif has_food:
+            parts.append(
+                "Analyze the food/dish in this image. Identify visible ingredients, "
+                "the type of dish, presentation style, and context."
+            )
+        elif has_location:
+            parts.append(
+                "Describe the location shown in this image: environment type, "
+                "architectural elements, signs or landmarks, atmosphere, and notable details."
+            )
+        else:
+            parts.append(
+                "Describe everything you see in this image in detail. "
+                "Include objects, colors, text, people, animals, spatial layout, "
+                "and any notable features."
+            )
+
+        # Aggiungi sempre focus su aspetti importanti per EN-only
+        parts.append(
+            "\nBe precise and thorough. If there is any text visible, transcribe it exactly."
+        )
+
+    return "\n".join(parts)
 
 
 @app.route('/api/status', methods=['GET'])
@@ -265,85 +399,124 @@ def api_chat_stream():
         try:
             # Auto-switch a modello vision se ci sono immagini
             if images:
-                # Pattern noti di modelli vision; ordine = priorità
-                _VISION_TAGS = ('moondream', 'llava', 'vision', 'bakllava')
-                
                 all_models = ai_engine.list_available_models()
                 vision_models = [m for m in all_models
-                                 if any(v in m.lower() for v in _VISION_TAGS)]
-                # Ordina per priorità tag
+                                 if any(v in m.lower() for v in _VISION_PRIORITY)]
+                # Ordina per priorità definita in _VISION_PRIORITY
                 def _priority(name):
                     low = name.lower()
-                    for i, tag in enumerate(_VISION_TAGS):
+                    for i, tag in enumerate(_VISION_PRIORITY):
                         if tag in low:
                             return i
-                    return len(_VISION_TAGS)
+                    return len(_VISION_PRIORITY)
                 vision_models.sort(key=_priority)
-                
+
                 current = ai_engine.model.lower()
-                is_vision = any(v in current for v in _VISION_TAGS)
-                
+                is_vision = any(v in current for v in _VISION_PRIORITY)
+
                 if not is_vision and vision_models:
                     ai_engine.model = vision_models[0]
                     logger.info("Auto-switch a modello vision: %s", ai_engine.model)
                 elif not is_vision and not vision_models:
-                    yield f"data: ⚠️ Nessun modello vision installato. Scaricane uno con: ollama pull moondream\n\n"
+                    yield f"data: ⚠️ Nessun modello vision installato. Scaricane uno con: ollama pull minicpm-v\n\n"
                     yield f"event: end\ndata: {conv_id}\n\n"
                     return
-                
-                # --- Percorso dedicato Vision (pipeline a 2 fasi) ---
-                # Fase 1: modello vision descrive l'immagine in inglese
-                #         (moondream e simili non gestiscono bene lingue non-EN)
-                # Fase 2: modello testo risponde alla domanda utente usando la
-                #         descrizione, nella lingua dell'utente
-                
-                vision_model = ai_engine.model   # modello vision attivo
-                text_model = config.AI_CONFIG['model']  # modello testo principale
-                
-                # Fase 1 — descrizione immagine (inglese, senza system prompt)
-                vision_prompt = (
-                    "Describe everything you see in this image in detail. "
-                    "Include objects, colors, text, people, animals, and any notable features."
-                )
-                image_description = ""
-                for chunk in ai_engine.generate_response_stream(
-                    vision_prompt,
-                    conversation_history=None,
-                    system_prompt=None,
-                    images=images,
-                ):
-                    image_description += chunk
-                
-                logger.info("Vision fase 1 completata: %d chars", len(image_description))
-                
-                # Salva la descrizione dell'immagine come messaggio di sistema
-                # nella conversazione, così i follow-up la vedono nel contesto
-                img_context = (
-                    f"[ANALISI IMMAGINE] L'utente ha inviato un'immagine. "
-                    f"Questa è la descrizione oggettiva di ciò che contiene: "
-                    f"{image_description.strip()}"
-                )
-                memory.add_message_advanced(
-                    conv_id, 'system', img_context, extract_entities=False
-                )
-                
-                # Fase 2 — risposta all'utente con modello testo
-                ai_engine.model = text_model
-                
-                answer_prompt = (
-                    f"Ho analizzato un'immagine e ottenuto questa descrizione:\n\n"
-                    f"---\n{image_description.strip()}\n---\n\n"
-                    f"Domanda dell'utente sull'immagine: \"{user_message}\"\n\n"
-                    f"Rispondi in modo dettagliato, basandoti sulla descrizione dell'immagine. "
-                    f"Rispondi nella stessa lingua della domanda dell'utente."
-                )
-                for chunk in ai_engine.generate_response_stream(
-                    answer_prompt,
-                    conversation_history=clean_history,
-                    system_prompt=config.SYSTEM_PROMPT,
-                ):
-                    full_response += chunk
-                    yield f"data: {chunk}\n\n"
+
+                vision_model = ai_engine.model
+                text_model = config.AI_CONFIG['model']
+                is_multilingual = any(tag in vision_model.lower()
+                                      for tag in _MULTILINGUAL_VISION)
+
+                # --- Prompt adattivo in base alla domanda utente ---
+                vision_prompt = _build_vision_prompt(user_message, is_multilingual)
+
+                if is_multilingual:
+                    # ═══ PIPELINE SINGOLA — modello multilingue ═══
+                    # Il modello vision risponde direttamente nella lingua
+                    # dell'utente, con l'immagine allegata. Niente fase 2.
+                    logger.info("Vision pipeline SINGOLA (multilingual): %s", vision_model)
+
+                    # Temperatura bassa per massima accuratezza visiva
+                    saved_temp = ai_engine.temperature
+                    ai_engine.temperature = 0.2
+
+                    direct_response = ""
+                    for chunk in ai_engine.generate_response_stream(
+                        vision_prompt,
+                        conversation_history=clean_history[-4:],  # ultimi 2 turni per contesto
+                        system_prompt=(
+                            "Sei un assistente visivo esperto. Analizza le immagini "
+                            "con precisione e rispondi nella lingua dell'utente. "
+                            "Sii dettagliato su testo visibile (OCR), colori, layout, "
+                            "persone, oggetti e contesto."
+                        ),
+                        images=images,
+                    ):
+                        direct_response += chunk
+                        full_response += chunk
+                        yield f"data: {chunk}\n\n"
+
+                    ai_engine.temperature = saved_temp
+
+                    # Salva descrizione per follow-up
+                    img_context = (
+                        f"[ANALISI IMMAGINE] L'utente ha inviato un'immagine. "
+                        f"Risposta dell'analisi visiva: {direct_response.strip()}"
+                    )
+                    memory.add_message_advanced(
+                        conv_id, 'system', img_context, extract_entities=False
+                    )
+
+                else:
+                    # ═══ PIPELINE 2 FASI — modello EN-only ═══
+                    # Fase 1: descrizione inglese con modello vision
+                    # Fase 2: risposta nella lingua dell'utente via modello testo
+                    logger.info("Vision pipeline 2 FASI (EN-only): %s -> %s",
+                                vision_model, text_model)
+
+                    saved_temp = ai_engine.temperature
+                    ai_engine.temperature = 0.15  # massima fedeltà per descrizione
+
+                    image_description = ""
+                    for chunk in ai_engine.generate_response_stream(
+                        vision_prompt,
+                        conversation_history=None,
+                        system_prompt=None,
+                        images=images,
+                    ):
+                        image_description += chunk
+
+                    ai_engine.temperature = saved_temp
+                    logger.info("Vision fase 1 completata: %d chars", len(image_description))
+
+                    # Salva la descrizione nella conversazione per follow-up
+                    img_context = (
+                        f"[ANALISI IMMAGINE] L'utente ha inviato un'immagine. "
+                        f"Questa è la descrizione oggettiva di ciò che contiene: "
+                        f"{image_description.strip()}"
+                    )
+                    memory.add_message_advanced(
+                        conv_id, 'system', img_context, extract_entities=False
+                    )
+
+                    # Fase 2 — risposta all'utente con modello testo
+                    ai_engine.model = text_model
+
+                    answer_prompt = (
+                        f"Ho analizzato un'immagine e ottenuto questa descrizione dettagliata:\n\n"
+                        f"---\n{image_description.strip()}\n---\n\n"
+                        f"Domanda dell'utente sull'immagine: \"{user_message}\"\n\n"
+                        f"Rispondi in modo dettagliato e preciso, basandoti SOLO sulla "
+                        f"descrizione dell'immagine. Non inventare dettagli che non sono "
+                        f"nella descrizione. Rispondi nella stessa lingua della domanda."
+                    )
+                    for chunk in ai_engine.generate_response_stream(
+                        answer_prompt,
+                        conversation_history=clean_history,
+                        system_prompt=config.SYSTEM_PROMPT,
+                    ):
+                        full_response += chunk
+                        yield f"data: {chunk}\n\n"
 
             elif PILOT_ENABLED and pilot:
                 # Streaming via Pilot (con eventuale pianificazione ReAct)
