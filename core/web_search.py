@@ -14,6 +14,7 @@ import html
 import logging
 import re
 from typing import List, Dict, Optional, Set
+from urllib.parse import quote_plus
 
 logger = logging.getLogger(__name__)
 
@@ -284,12 +285,14 @@ def search_and_format(message: str, max_results: int = 5) -> Optional[dict]:
     youtube = is_youtube_query(message) if explicit else False
     clean_q = _clean_query(message) if explicit else _clean_factual_query(message)
 
-    # Per domande fattuali: cerca preferibilmente su Wikipedia
+    # Per domande fattuali: prova prima Wikipedia API per contenuto ricco,
+    # poi DuckDuckGo come fallback per snippet aggiuntivi.
+    wiki_extract = None
     if factual and not youtube:
+        wiki_extract = _fetch_wikipedia_extract(clean_q)
         results = web_search(
             f"wikipedia {clean_q}", max_results=max_results, region="it-it",
         )
-        # Fallback: se Wikipedia non dà risultati, cerca normalmente
         if not results:
             results = web_search(clean_q, max_results=max_results)
     else:
@@ -310,7 +313,9 @@ def search_and_format(message: str, max_results: int = 5) -> Optional[dict]:
         # Modalità "augmented": contesto per il modello
         return {
             "mode": "augmented",
-            "context": _format_augmented_context(results, query=message),
+            "context": _format_augmented_context(
+                results, query=message, wiki_extract=wiki_extract,
+            ),
             "urls": urls,
         }
 
@@ -336,16 +341,28 @@ def _clean_factual_query(message: str) -> str:
     return cleaned
 
 
-def _format_augmented_context(results: List[Dict[str, str]], query: str = "") -> str:
+def _format_augmented_context(
+    results: List[Dict[str, str]],
+    query: str = "",
+    wiki_extract: Optional[str] = None,
+) -> str:
     """
     Formatta i risultati come contesto fattuale per il system prompt.
-    Il modello usa queste informazioni per arricchire la risposta.
+    Se disponibile, include l'estratto Wikipedia come fonte principale.
     """
     lines = [
         "[DATI DA RICERCA WEB — usa queste informazioni per rispondere]",
         f"Domanda dell'utente: \"{query}\"" if query else "",
         "",
     ]
+
+    # Wikipedia come fonte principale (contenuto ricco, ~1000-3000 chars)
+    if wiki_extract:
+        lines.append("═══ CONTENUTO WIKIPEDIA (fonte principale) ═══")
+        lines.append(wiki_extract)
+        lines.append("")
+        lines.append("═══ ALTRE FONTI WEB ═══")
+
     for i, r in enumerate(results, 1):
         title = r.get("title", "")
         snippet = r.get("snippet", "")
@@ -359,11 +376,108 @@ def _format_augmented_context(results: List[Dict[str, str]], query: str = "") ->
 
     lines.extend([
         "ISTRUZIONI:",
-        "- Rispondi in modo COMPLETO e DETTAGLIATO usando i dati sopra.",
-        "- Struttura la risposta con paragrafi, elenchi puntati o sezioni Markdown.",
-        "- Integra le informazioni da pi\u00f9 fonti per dare una risposta ricca.",
+        "- Rispondi in modo COMPLETO e DETTAGLIATO.",
+        "- Usa PRINCIPALMENTE il contenuto Wikipedia se disponibile.",
+        "- Integra con le altre fonti e la tua conoscenza per arricchire.",
+        "- Struttura con paragrafi, elenchi puntati, sezioni Markdown.",
+        "- Copri: biografia/definizione, fatti chiave, contesto storico, impatto.",
         "- NON citare le fonti per numero (l'utente non le vede).",
         "- NON inventare URL. NON inserire link nella risposta.",
-        "- Se i dati non bastano a rispondere completamente, dichiaralo.",
+        "- Se i dati non bastano, integra con la tua conoscenza dichiarandolo.",
     ])
     return "\n".join(lines)
+
+
+# ── Wikipedia API — contenuto ricco per domande fattuali ───────────────
+
+_WIKI_API = "https://{lang}.wikipedia.org/w/api.php"
+
+
+def _fetch_wikipedia_extract(
+    query: str,
+    *,
+    lang: str = "it",
+    max_chars: int = 3000,
+) -> Optional[str]:
+    """
+    Cerca su Wikipedia e restituisce l'introduzione dell'articolo più rilevante.
+
+    Usa l'API MediaWiki (opensearch → query/extracts). Nessuna dipendenza
+    aggiuntiva: solo requests (già usato da ddgs).
+
+    Returns:
+        Testo dell'introduzione (fino a max_chars), o None se non trovato.
+    """
+    try:
+        import requests
+    except ImportError:
+        logger.warning("requests non installato — skip Wikipedia")
+        return None
+
+    try:
+        headers = {"User-Agent": "OmniEyeAI/1.0 (local assistant; Python/requests)"}
+
+        # Step 1: OpenSearch per trovare il titolo esatto
+        search_url = _WIKI_API.format(lang=lang)
+        search_resp = requests.get(
+            search_url,
+            params={
+                "action": "opensearch",
+                "search": query,
+                "limit": 1,
+                "format": "json",
+            },
+            headers=headers,
+            timeout=5,
+        )
+        search_resp.raise_for_status()
+        search_data = search_resp.json()
+
+        # opensearch ritorna: [query, [titles], [descriptions], [urls]]
+        if not search_data[1]:
+            if lang != "en":
+                logger.info("Wikipedia IT: nessun risultato per '%s', provo EN", query)
+                return _fetch_wikipedia_extract(query, lang="en", max_chars=max_chars)
+            return None
+
+        title = search_data[1][0]
+
+        # Step 2: Ottieni l'estratto completo dell'introduzione
+        extract_resp = requests.get(
+            search_url,
+            headers=headers,
+            params={
+                "action": "query",
+                "prop": "extracts",
+                "exintro": "1",
+                "explaintext": "1",
+                "titles": title,
+                "format": "json",
+                "exsectionformat": "plain",
+            },
+            timeout=5,
+        )
+        extract_resp.raise_for_status()
+        pages = extract_resp.json().get("query", {}).get("pages", {})
+
+        for page in pages.values():
+            extract = page.get("extract", "")
+            if not extract:
+                continue
+            # Tronca al confine di frase se troppo lungo
+            if len(extract) > max_chars:
+                cut = extract[:max_chars].rfind(". ")
+                if cut > max_chars // 2:
+                    extract = extract[: cut + 1]
+                else:
+                    extract = extract[:max_chars] + "..."
+            logger.info(
+                "Wikipedia [%s]: %d chars per '%s'", lang, len(extract), title,
+            )
+            return extract
+
+        return None
+
+    except Exception as e:
+        logger.warning("Wikipedia API error: %s", e)
+        return None
