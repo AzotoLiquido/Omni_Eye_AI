@@ -77,15 +77,20 @@ class PilotConfig:
                 "runtime.model_id o runtime.model.id è obbligatorio"
             )
 
-        # Validazione jsonschema se disponibile
-        try:
-            import jsonschema
-            if self._schema:
-                jsonschema.validate(instance=self._raw, schema=self._schema)
-        except ImportError:
-            pass  # Validazione base è sufficiente
-        except jsonschema.ValidationError as e:
-            raise ConfigValidationError(f"Validazione schema fallita: {e.message}")
+        # Validazione jsonschema — solo se la config è in formato nested
+        # (il formato flat non è conforme allo schema JSON, ma è supportato
+        #  dal config_loader tramite le property di accesso ai dati)
+        _is_nested = isinstance(rt.get("model"), dict)
+        if _is_nested and self._schema:
+            try:
+                import jsonschema
+                # Rimuovi $schema dal documento prima della validazione
+                instance = {k: v for k, v in self._raw.items() if k != "$schema"}
+                jsonschema.validate(instance=instance, schema=self._schema)
+            except ImportError:
+                pass  # Validazione base è sufficiente
+            except jsonschema.ValidationError as e:
+                raise ConfigValidationError(f"Validazione schema fallita: {e.message}")
 
     # ------------------------------------------------------------------
     # Accesso ai dati (proprietà)

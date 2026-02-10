@@ -109,9 +109,14 @@ class ReActPlanner:
         msg_lower = user_message.lower()
         score = 0
         # Keyword forti valgono 2
-        score += sum(2 for kw in tool_keywords if kw in msg_lower)
-        # Keyword deboli valgono 1
-        score += sum(1 for kw in weak_keywords if kw in msg_lower)
+        matched_strong = set()
+        for kw in tool_keywords:
+            if kw in msg_lower:
+                score += 2
+                matched_strong.update(kw.split())
+        # Keyword deboli valgono 1 (skip se già coperte da una forte)
+        score += sum(1 for kw in weak_keywords
+                     if kw in msg_lower and kw not in matched_strong)
 
         return score >= 2
 

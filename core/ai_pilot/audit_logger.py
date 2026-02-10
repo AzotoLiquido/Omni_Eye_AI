@@ -190,12 +190,17 @@ class AuditLogger:
         buf = self._buffers.get(path)
         if not buf:
             return
+        # Sposta le righe fuori dal buffer prima di scrivere;
+        # in caso di errore le rimettiamo al loro posto.
+        pending = list(buf)
+        buf.clear()
         try:
             self._maybe_rotate(path)
             with open(path, "a", encoding="utf-8") as f:
-                f.writelines(buf)
-            buf.clear()
+                f.writelines(pending)
         except Exception as e:
+            # Ripristina le righe non scritte nel buffer
+            buf.extend(pending)
             self._logger.error("Errore scrittura log %s: %s", path, e)
 
     def flush(self) -> None:

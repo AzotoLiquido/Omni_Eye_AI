@@ -62,6 +62,35 @@ class Pilot:
     # API PRINCIPALE
     # ==================================================================
 
+    def _prepare_turn(
+        self,
+        user_message: str,
+        conv_id: str,
+    ) -> Tuple[str, List, bool]:
+        """
+        Logica condivisa per process() e process_stream():
+        log turno utente, retrieval, build system prompt, planning decision.
+
+        Returns:
+            (system_prompt, available_tools, use_planning)
+        """
+        self.logger.log_conversation_turn(conv_id, "user", user_message)
+
+        memory_context = self.memory.retrieve(user_message) if user_message else ""
+        available_tools = self.tools.get_available_tools()
+
+        system_prompt = self.prompt_builder.build_system_prompt(
+            memory_context=memory_context,
+            available_tools=available_tools or None,
+        )
+
+        use_planning = (
+            hasattr(self.planner, 'needs_planning') and
+            self.planner.needs_planning(user_message, available_tools)
+        )
+
+        return system_prompt, available_tools, use_planning
+
     def build_system_prompt(
         self,
         user_message: str = "",
@@ -113,30 +142,15 @@ class Pilot:
         if not ai_engine:
             raise ValueError("ai_engine è richiesto per process()")
 
-        # Log turno utente
-        self.logger.log_conversation_turn(conv_id, "user", user_message)
-
-        # Retrieval dalla memoria (una sola volta)
-        memory_context = self.memory.retrieve(user_message) if user_message else ""
-        available_tools = self.tools.get_available_tools()
-
-        # Costruisci system prompt con il contesto già recuperato
-        system_prompt = self.prompt_builder.build_system_prompt(
-            memory_context=memory_context,
-            available_tools=available_tools or None,
-        )
-
-        # Decidi se serve il planner
-        use_planning = (
-            hasattr(self.planner, 'needs_planning') and
-            self.planner.needs_planning(user_message, available_tools)
+        system_prompt, available_tools, use_planning = self._prepare_turn(
+            user_message, conv_id
         )
 
         metadata = {
             "used_planning": use_planning,
             "steps": [],
             "tools_called": [],
-            "memory_retrieved": bool(memory_context),
+            "memory_retrieved": bool(system_prompt),
         }
 
         if use_planning and isinstance(self.planner, ReActPlanner):
@@ -182,23 +196,8 @@ class Pilot:
         if not ai_engine:
             raise ValueError("ai_engine è richiesto per process_stream()")
 
-        # Log turno utente
-        self.logger.log_conversation_turn(conv_id, "user", user_message)
-
-        # Retrieval dalla memoria (una sola volta)
-        memory_context = self.memory.retrieve(user_message) if user_message else ""
-        available_tools = self.tools.get_available_tools()
-
-        # Costruisci system prompt con il contesto già recuperato
-        system_prompt = self.prompt_builder.build_system_prompt(
-            memory_context=memory_context,
-            available_tools=available_tools or None,
-        )
-
-        # Decidi se serve il planner
-        use_planning = (
-            hasattr(self.planner, 'needs_planning') and
-            self.planner.needs_planning(user_message, available_tools)
+        system_prompt, available_tools, use_planning = self._prepare_turn(
+            user_message, conv_id
         )
 
         if use_planning and isinstance(self.planner, ReActPlanner):
