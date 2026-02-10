@@ -16,7 +16,8 @@ const App = {
         currentConversationId: null,
         currentUploadedFile: null,
         pendingImages: [],       // Array di {base64, name, dataUrl} per immagini in attesa
-        isProcessing: false
+        isProcessing: false,
+        currentAbortController: null  // AbortController per fetch streaming (P2)
     },
     
     gridOrb: {
@@ -111,6 +112,7 @@ async function init() {
         qpToggle.addEventListener('click', () => {
             qpPanel.classList.toggle('expanded');
             qpToggle.classList.toggle('active');
+            qpToggle.setAttribute('aria-expanded', qpPanel.classList.contains('expanded'));
         });
     }
     
@@ -402,6 +404,7 @@ function setStatus(status, text) {
 async function loadAvailableModels() {
     try {
         const response = await fetch(`${API_BASE}/models`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
         
         elements.modelSelect.innerHTML = '';
@@ -461,6 +464,7 @@ function handleInputChange() {
     const hasText = elements.messageInput.value.trim().length > 0;
     const hasImages = App.state.pendingImages.length > 0;
     elements.sendBtn.disabled = !(hasText || hasImages);
+    elements.sendBtn.setAttribute('aria-disabled', String(elements.sendBtn.disabled));
     
     // Auto-resize textarea
     elements.messageInput.style.height = 'auto';
@@ -492,8 +496,8 @@ function prepareUIForSending() {
         welcomeMsg.style.display = 'none';
     }
 
-    // Nascondi quick prompts wrapper
-    const qpw = document.getElementById('quickPromptsWrapper');
+    // Nascondi quick prompts panel (P1-5: was quickPromptsWrapper)
+    const qpw = document.getElementById('quickPrompts');
     if (qpw) qpw.style.display = 'none';
 }
 
@@ -594,11 +598,31 @@ async function sendMessage() {
             requestBody.images = images.map(img => img.base64);
         }
         
+        // P1-7: Includi contesto documento se presente
+        if (App.state.currentUploadedFile && App.state.currentUploadedFile.text) {
+            requestBody.message = `[Documento caricato: "${App.state.currentUploadedFile.info?.name || 'file'}"]
+
+Contenuto (anteprima):
+${App.state.currentUploadedFile.text.slice(0, 3000)}
+
+---
+Domanda utente: ${requestBody.message}`;
+            App.state.currentUploadedFile = null;
+            removeFile();
+        }
+        
+        // P2: Abort previous streaming request if any
+        if (App.state.currentAbortController) {
+            App.state.currentAbortController.abort();
+        }
+        App.state.currentAbortController = new AbortController();
+        
         // Step 7: Invia richiesta con streaming
         const response = await fetch(`${API_BASE}/chat/stream`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(requestBody)
+            body: JSON.stringify(requestBody),
+            signal: App.state.currentAbortController.signal
         });
         
         if (!response.ok) {
@@ -633,6 +657,7 @@ async function sendMessage() {
         showNotification('❌ Errore nell\'invio del messaggio', 'error');
     } finally {
         // Step 11: Ripristina UI
+        App.state.currentAbortController = null;
         restoreUIAfterSending();
     }
 }
@@ -732,6 +757,7 @@ function scrollToBottom() {
 async function loadConversations() {
     try {
         const response = await fetch(`${API_BASE}/conversations`, { cache: 'no-store' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const conversations = await response.json();
         
         elements.conversationsList.innerHTML = '';
@@ -822,10 +848,10 @@ async function loadConversation(convId) {
                     <p>Nessun messaggio salvato in questa chat</p>
                 </div>
             `;
-            const qpw = document.getElementById('quickPromptsWrapper');
+            const qpw = document.getElementById('quickPrompts');
             if (qpw) qpw.style.display = '';
         } else {
-            const qpw = document.getElementById('quickPromptsWrapper');
+            const qpw = document.getElementById('quickPrompts');
             if (qpw) qpw.style.display = 'none';
         }
 
@@ -875,6 +901,7 @@ async function createNewConversation() {
             body: JSON.stringify({})
         });
         
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
         
         if (data.success) {
@@ -887,7 +914,7 @@ async function createNewConversation() {
             `;
             elements.chatTitle.textContent = 'Nuova Conversazione';
             elements.messageInput.focus();
-            const qpw = document.getElementById('quickPromptsWrapper');
+            const qpw = document.getElementById('quickPrompts');
             if (qpw) qpw.style.display = '';
             startGridOrb();
             await loadConversations();
@@ -1074,7 +1101,12 @@ function handleImageUpload(e) {
 function _resizeAndEncodeImage(file) {
     return new Promise((resolve, reject) => {
         const img = new Image();
+        const objectUrl = URL.createObjectURL(file);
+        img.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error('Image load failed')); };
         img.onload = function() {
+            // P2: Revoke blob URL to avoid memory leak
+            URL.revokeObjectURL(objectUrl);
+
             const max = IMAGE_UPLOAD_CONFIG.maxDimension;
             let w = img.naturalWidth;
             let h = img.naturalHeight;
@@ -1102,11 +1134,9 @@ function _resizeAndEncodeImage(file) {
             const base64 = dataUrl.split(',')[1];
             resolve({ base64, dataUrl });
         };
-        img.onerror = reject;
-        img.src = URL.createObjectURL(file);
+        img.src = objectUrl;
     });
 }
-
 /**
  * Rimuove l'immagine pendente e ripristina lo stato.
  */

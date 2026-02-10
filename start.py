@@ -35,7 +35,13 @@ def check_dependencies():
     """Verifica le dipendenze Python"""
     print("\n🔍 Verifica dipendenze...")
     
-    required = ['flask', 'ollama', 'PyPDF2', 'docx', 'flask_cors']
+    required = ['flask', 'ollama', 'PyPDF2', 'docx', 'flask_cors', 'flask_limiter', 'flask_wtf']
+    # Packages with different import vs pip names
+    _IMPORT_MAP = {
+        'docx': 'docx',
+        'flask_limiter': 'flask_limiter',
+        'flask_wtf': 'flask_wtf',
+    }
     missing = []
     
     for package in required:
@@ -80,6 +86,8 @@ def check_ollama():
         os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Programs', 'Ollama', 'ollama.exe')
     ]
     
+    discovered_ollama_cmd = None  # P1-5: remember working command
+    
     for ollama_cmd in ollama_commands:
         try:
             result = subprocess.run(
@@ -90,6 +98,7 @@ def check_ollama():
             )
             
             if result.returncode == 0:
+                discovered_ollama_cmd = ollama_cmd
                 print("   ✅ Ollama disponibile")
                 
                 # Mostra modelli installati
@@ -102,7 +111,7 @@ def check_ollama():
                             print(f"      - {model_name}")
                 else:
                     print("\n   ⚠️  Nessun modello installato!")
-                    suggest_model_download()
+                    suggest_model_download(discovered_ollama_cmd)
                     
                 return True
                 
@@ -121,8 +130,12 @@ def check_ollama():
     print("      Oppure: https://ollama.ai/download")
     return False
 
-def suggest_model_download():
-    """Suggerisce di scaricare un modello"""
+def suggest_model_download(ollama_cmd='ollama'):
+    """Suggerisce di scaricare un modello
+    
+    Args:
+        ollama_cmd: percorso dell'eseguibile Ollama scoperto
+    """
     print("\n💡 Scarica un modello AI:")
     print("   Modelli consigliati per iniziare:")
     print("   - llama3.2 (3B) - Veloce, buono per PC normali")
@@ -134,7 +147,7 @@ def suggest_model_download():
     if response.lower() == 's':
         print("\n⏳ Download del modello... (può richiedere alcuni minuti)")
         try:
-            subprocess.run(['ollama', 'pull', 'llama3.2'], check=True)
+            subprocess.run([ollama_cmd, 'pull', 'llama3.2'], check=True)
             print("✅ Modello scaricato!")
             return True
         except subprocess.CalledProcessError:

@@ -8,6 +8,7 @@ import os
 import re
 import uuid
 from datetime import datetime
+import time as _time
 from typing import List, Dict, Optional
 import config
 
@@ -31,6 +32,11 @@ def _validate_conv_id(conv_id: str) -> str:
 
 class ConversationMemory:
     """Gestisce il salvataggio e il caricamento delle conversazioni"""
+    
+    # P2-9: Simple time-based cache for list_all_conversations
+    _conv_list_cache = None
+    _conv_list_cache_time = 0
+    _CACHE_TTL = 2.0  # seconds
     
     def __init__(self):
         """Inizializza il sistema di memoria"""
@@ -76,14 +82,24 @@ class ConversationMemory:
         if not conversation:
             return False
         
+        # P3-11: Single datetime.now() call for consistency
+        now_ts = datetime.now().isoformat()
+        
+        # P3-12: Limit messages per conversation to prevent unbounded growth
+        _MAX_MESSAGES = 500
+        if len(conversation.get('messages', [])) >= _MAX_MESSAGES:
+            # Keep the first message (for title) + last (_MAX_MESSAGES - 1)
+            msgs = conversation['messages']
+            conversation['messages'] = [msgs[0]] + msgs[-(_MAX_MESSAGES - 2):]
+        
         message = {
             'role': role,
             'content': content,
-            'timestamp': datetime.now().isoformat()
+            'timestamp': now_ts
         }
         
         conversation['messages'].append(message)
-        conversation['updated_at'] = datetime.now().isoformat()
+        conversation['updated_at'] = now_ts
         
         # Aggiorna il titolo automaticamente dal primo messaggio utente
         if len(conversation['messages']) == 1 and role == 'user':
@@ -151,6 +167,12 @@ class ConversationMemory:
         Returns:
             Lista di dizionari con metadata delle conversazioni
         """
+        # P2-9: Return cached result if fresh enough
+        now = _time.monotonic()
+        if (ConversationMemory._conv_list_cache is not None
+                and now - ConversationMemory._conv_list_cache_time < self._CACHE_TTL):
+            return list(ConversationMemory._conv_list_cache)
+        
         conversations = []
         
         try:
@@ -165,13 +187,14 @@ class ConversationMemory:
                 except Exception:
                     continue
             
-            # Ordina per data di aggiornamento (piÃ¹ recenti prima)
             conversations.sort(key=lambda x: x['updated_at'], reverse=True)
             
         except Exception as e:
             logger.error("Errore lista conversazioni: %s", e)
         
-        return conversations
+        ConversationMemory._conv_list_cache = conversations
+        ConversationMemory._conv_list_cache_time = now
+        return list(conversations)
     
     def delete_conversation(self, conv_id: str) -> bool:
         """
@@ -189,6 +212,7 @@ class ConversationMemory:
         try:
             if os.path.exists(filepath):
                 os.remove(filepath)
+                ConversationMemory._conv_list_cache = None  # Invalidate cache
                 return True
             return False
         except Exception as e:
@@ -235,6 +259,7 @@ class ConversationMemory:
             with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump(conversation, f, ensure_ascii=False, indent=2)
             os.replace(tmp_path, filepath)
+            ConversationMemory._conv_list_cache = None  # Invalidate cache
             return True
         except Exception as e:
             logger.error("Errore salvataggio conversazione %s: %s", conv_id, e)

@@ -4,7 +4,6 @@ Motore AI - Gestisce l'interazione con Ollama
 
 import logging
 import ollama
-from collections import deque
 from typing import List, Dict, Generator
 import config
 

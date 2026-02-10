@@ -8,6 +8,7 @@ Tipi supportati:
   - db          → query sulla memoria SQLite
 """
 
+import ast
 import os
 import re
 import shlex
@@ -145,14 +146,56 @@ class ToolExecutor:
         else:
             return ToolResult(tool_id, False, "", f"Azione filesystem sconosciuta: {action}")
 
-    # Pattern import/builtin pericolosi bloccati nella sandbox Python
-    _DANGEROUS_PY = re.compile(
-        r'\b(?:import|from)\s+(?:os|subprocess|shutil|socket|ctypes|signal|'
-        r'multiprocessing|webbrowser|importlib)\b|'
-        r'\b__import__\s*\(|'
-        r'\bexec\s*\(|\beval\s*\(|'
-        r'\bimportlib\b|\bgetattr\s*\(\s*__builtins__'
-    )
+    # Moduli consentiti nella sandbox Python (allowlist)
+    _ALLOWED_PY_MODULES = frozenset({
+        "math", "random", "string", "json", "re", "datetime", "collections",
+        "itertools", "functools", "operator", "decimal", "fractions",
+        "statistics", "textwrap", "unicodedata", "enum", "dataclasses",
+        "typing", "copy", "pprint", "io", "csv", "hashlib", "hmac",
+        "base64", "binascii", "struct", "codecs", "difflib",
+    })
+
+    @classmethod
+    def _validate_python_ast(cls, code: str) -> Optional[str]:
+        """Validate Python code via AST — returns error string or None if safe."""
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as e:
+            return f"Errore di sintassi: {e}"
+
+        for node in ast.walk(tree):
+            # Block imports of non-allowed modules
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    top = alias.name.split(".")[0]
+                    if top not in cls._ALLOWED_PY_MODULES:
+                        return f"Import non consentito: {alias.name}"
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    top = node.module.split(".")[0]
+                    if top not in cls._ALLOWED_PY_MODULES:
+                        return f"Import non consentito: {node.module}"
+            # Block exec, eval, __import__, compile, getattr on builtins
+            elif isinstance(node, ast.Call):
+                func = node.func
+                if isinstance(func, ast.Name) and func.id in (
+                    "exec", "eval", "__import__", "compile", "breakpoint",
+                    "globals", "locals",
+                ):
+                    return f"Funzione non consentita: {func.id}()"
+                if isinstance(func, ast.Attribute) and func.attr in (
+                    "__import__", "__subclasses__",
+                ):
+                    return f"Attributo non consentito: .{func.attr}"
+            # Block access to dunder attributes (except __init__, __str__, etc.)
+            elif isinstance(node, ast.Attribute):
+                if node.attr.startswith("__") and node.attr.endswith("__"):
+                    _safe_dunders = {"__init__", "__str__", "__repr__", "__len__",
+                                     "__iter__", "__next__", "__enter__", "__exit__",
+                                     "__getitem__", "__setitem__", "__contains__"}
+                    if node.attr not in _safe_dunders:
+                        return f"Accesso dunder non consentito: {node.attr}"
+        return None
 
     def _exec_python(self, tool_id: str, tool_cfg: Dict, params: Dict) -> ToolResult:
         """Esegue un frammento Python in subprocess isolato con timeout"""
@@ -160,16 +203,18 @@ class ToolExecutor:
         if not code.strip():
             return ToolResult(tool_id, False, "", "Nessun codice fornito")
 
-        # Blocca import pericolosi
-        if self._DANGEROUS_PY.search(code):
-            return ToolResult(tool_id, False, "",
-                              "Codice contiene import non consentiti nella sandbox")
+        # P0-3: Validate via AST instead of bypassable regex blocklist
+        ast_error = self._validate_python_ast(code)
+        if ast_error:
+            return ToolResult(tool_id, False, "", ast_error)
 
         max_output = tool_cfg.get("parameters", {}).get("max_output_chars", 10000)
 
         try:
+            # P2: Use system Python instead of venv executable for sandbox isolation
+            python_exe = shlex.split("python")[0] if os.name == "nt" else "python3"
             result = subprocess.run(
-                [sys.executable, "-I", "-c", code],  # -I = isolated mode
+                [python_exe, "-I", "-c", code],  # -I = isolated mode
                 capture_output=True,
                 text=True,
                 timeout=self._timeout_s,
@@ -199,7 +244,8 @@ class ToolExecutor:
             return ToolResult(tool_id, False, "", "Nessun comando fornito")
 
         # Blocca metacaratteri shell pericolosi
-        _SHELL_META = re.compile(r'[;&|`$(){}\[\]<>!\\]')
+        # P2: Backslash (\) is a valid Windows path separator — don't block it
+        _SHELL_META = re.compile(r'[;&|`$(){}\[\]<>!]')
         if _SHELL_META.search(command):
             return ToolResult(tool_id, False, "",
                               "Comando contiene metacaratteri shell non consentiti")
@@ -211,7 +257,8 @@ class ToolExecutor:
         }
 
         try:
-            args = shlex.split(command)
+            # P1-10: Use posix=False on Windows to handle backslash paths correctly
+            args = shlex.split(command, posix=(os.name != 'nt'))
         except ValueError as e:
             return ToolResult(tool_id, False, "", f"Errore parsing comando: {e}")
 
@@ -276,11 +323,15 @@ class ToolExecutor:
     # ------------------------------------------------------------------
 
     def _resolve_safe_path(self, target: str) -> Optional[Path]:
-        """Risolve un percorso assicurandosi che resti nella sandbox"""
+        """Risolve un percorso assicurandosi che resti nella sandbox.
+        
+        P1-9: Usa is_relative_to() per proteggere da symlink traversal
+        e bypass case-insensitive su Windows.
+        """
         try:
             resolved = (self._fs_root / target).resolve()
-            # Verifica che sia dentro fs_root
-            if self._fs_root in resolved.parents or resolved == self._fs_root:
+            # is_relative_to handles symlinks and case-insensitive paths correctly
+            if resolved.is_relative_to(self._fs_root):
                 return resolved
             return None
         except (ValueError, OSError):
@@ -343,10 +394,13 @@ class ToolExecutor:
         return msg[:500]
 
     def _sandboxed_env(self) -> Dict[str, str]:
-        """Ambiente di esecuzione ridotto per subprocess (approccio allowlist)"""
+        """Ambiente di esecuzione ridotto per subprocess (approccio allowlist).
+        
+        P0-4: PYTHONPATH, VIRTUAL_ENV, NODE_PATH rimossi per evitare
+        che il subprocess sandbox acceda a moduli/ambienti del progetto.
+        """
         _ALLOWED_ENV_KEYS = {
             "PATH", "HOME", "USERPROFILE", "LANG", "LC_ALL",
             "TMP", "TEMP", "TMPDIR", "SYSTEMROOT", "COMSPEC",
-            "PYTHONPATH", "VIRTUAL_ENV", "NODE_PATH",
         }
         return {k: v for k, v in os.environ.items() if k.upper() in _ALLOWED_ENV_KEYS}

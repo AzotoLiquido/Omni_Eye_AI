@@ -5,6 +5,7 @@ Processore Documenti - Estrae testo da vari formati di file
 import logging
 import os
 import time
+import uuid
 from typing import Optional, Tuple
 import config
 
@@ -87,7 +88,7 @@ class DocumentProcessor:
     
     def _process_txt(self, filepath: str) -> Tuple[str, None]:
         """Processa file di testo"""
-        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+        with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
             return f.read(), None
     
     def _process_pdf(self, filepath: str) -> Tuple[Optional[str], Optional[str]]:
@@ -131,7 +132,7 @@ class DocumentProcessor:
     
     def _process_code(self, filepath: str) -> Tuple[str, None]:
         """Processa file di codice"""
-        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+        with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
             content = f.read()
         
         # Aggiungi contesto sul tipo di file
@@ -152,16 +153,15 @@ class DocumentProcessor:
         if not self.is_allowed_file(filename):
             return None, "Tipo di file non permesso"
         
-        # Crea nome file sicuro
-        safe_filename = self._make_safe_filename(filename)
-        filepath = os.path.join(self.uploads_dir, safe_filename)
+        # P2-6: Controlla dimensione prima di scrivere su disco
+        if len(file_data) > self.max_file_size:
+            return None, f"File troppo grande (max {self.max_file_size // (1024*1024)}MB)"
         
-        # Evita sovrascritture
-        base, ext = os.path.splitext(filepath)
-        counter = 1
-        while os.path.exists(filepath):
-            filepath = f"{base}_{counter}{ext}"
-            counter += 1
+        # Crea nome file sicuro con UUID per evitare race condition (P2-7)
+        safe_filename = self._make_safe_filename(filename)
+        name, ext = os.path.splitext(safe_filename)
+        unique_filename = f"{name}_{uuid.uuid4().hex[:8]}{ext}"
+        filepath = os.path.join(self.uploads_dir, unique_filename)
         
         try:
             with open(filepath, 'wb') as f:
@@ -190,7 +190,7 @@ class DocumentProcessor:
         # Blocca nomi riservati Windows
         if name.upper() in self._RESERVED_NAMES:
             name = f"_{name}"
-        max_name_len = 255 - len(ext)
+        max_name_len = max(1, 255 - len(ext))
         if len(name) > max_name_len:
             name = name[:max_name_len]
         safe = name + ext
@@ -219,7 +219,7 @@ class DocumentProcessor:
             'size': stat.st_size,
             'size_mb': round(stat.st_size / (1024 * 1024), 2),
             'extension': os.path.splitext(filepath)[1],
-            'created': stat.st_ctime,
+            'modified': stat.st_mtime,
         }
     
     def clean_old_uploads(self, days: int = 7):
@@ -240,8 +240,11 @@ class DocumentProcessor:
                 if os.path.isfile(filepath):
                     file_age = current_time - os.path.getmtime(filepath)
                     if file_age > max_age:
-                        os.remove(filepath)
-                        removed += 1
+                        try:
+                            os.remove(filepath)
+                            removed += 1
+                        except OSError as exc:
+                            logger.warning("Impossibile rimuovere %s: %s", filepath, exc)
             
             if removed > 0:
                 logger.info("Rimossi %d file upload vecchi", removed)

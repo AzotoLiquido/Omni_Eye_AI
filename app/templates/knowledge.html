@@ -6,6 +6,17 @@
     <title>Knowledge Base - Omni Eye AI</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
     <style>
+        /* P1-6: Map knowledge.html CSS vars to cyberpunk theme vars from style.css */
+        :root {
+            --primary: var(--accent);
+            --primary-dark: var(--accent-strong);
+            --secondary: var(--success);
+            --bg-primary: rgba(6, 14, 8, 0.95);
+            --bg-tertiary: var(--bg-veil-strong);
+            --text-primary: var(--ink);
+            --text-secondary: var(--ink-soft);
+            --border: var(--line);
+        }
         .kb-container {
             max-width: 1200px;
             margin: 0 auto;
@@ -39,7 +50,7 @@
             background: var(--bg-primary);
             border-radius: 12px;
             padding: 1.5rem;
-            box-shadow: 0 2px 8px var(--shadow);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.55);
             border: 1px solid var(--border);
         }
         
@@ -199,7 +210,7 @@
     </style>
 </head>
 <body>
-    <div class="kb-container">
+    <main class="kb-container">
         <a href="/" class="back-link">← Torna alla Chat</a>
         
         <div class="kb-header">
@@ -268,13 +279,16 @@
                     class="search-box" 
                     placeholder="Cerca informazioni, topic, persone..."
                 >
-                <button class="btn" onclick="searchKnowledge()">Cerca</button>
+                <button class="btn" id="searchBtn">Cerca</button>
                 <div id="searchResults" style="margin-top: 1rem;"></div>
             </div>
         </div>
-    </div>
+    </main>
     
     <script>
+        // P2: Replace inline onclick with addEventListener
+        document.getElementById('searchBtn').addEventListener('click', searchKnowledge);
+        
         // Carica i dati al caricamento della pagina
         document.addEventListener('DOMContentLoaded', async () => {
             await loadKnowledgeBase();

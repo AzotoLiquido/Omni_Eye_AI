@@ -7,9 +7,11 @@ from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_wtf import CSRFProtect
+import base64 as _b64
 import logging
 import os
 import sys
+import threading
 import re as _re
 
 logger = logging.getLogger(__name__)
@@ -24,6 +26,14 @@ import config
 
 # Regex per validazione ID conversazione (anti path-traversal)
 _SAFE_CONV_ID = _re.compile(r'^[a-zA-Z0-9_-]+$')
+
+# Lock per cambio modello thread-safe (P1-7)
+_model_lock = threading.Lock()
+
+
+def _sse_data(text: str) -> str:
+    """Format text as SSE data, handling embedded newlines (P1-6)."""
+    return "".join(f"data: {line}\n" for line in text.split('\n')) + "\n"
 
 app = Flask(__name__)
 app.secret_key = config.SECRET_KEY
@@ -372,8 +382,9 @@ def api_chat_stream():
                     return jsonify({'error': f'images[{i}]: troppo grande (max ~10MB)'}), 400
                 # Controlla che sia base64 valido (campiona i primi bytes)
                 try:
-                    import base64 as _b64
-                    _b64.b64decode(img[:100], validate=True)
+                    _sample = img[:1024]
+                    _sample += '=' * (-len(_sample) % 4)
+                    _b64.b64decode(_sample, validate=True)
                 except Exception:
                     return jsonify({'error': f'images[{i}]: base64 non valido'}), 400
                 images.append(img)
@@ -431,6 +442,7 @@ def api_chat_stream():
     def generate():
         """Generator per lo streaming"""
         full_response = ""
+        response_saved = False
         
         try:
             # Auto-switch a modello vision se ci sono immagini
@@ -499,7 +511,7 @@ def api_chat_stream():
                     ):
                         direct_response += chunk
                         full_response += chunk
-                        yield f"data: {chunk}\n\n"
+                        yield _sse_data(chunk)
 
                     # Salva descrizione per follow-up
                     img_context = (
@@ -566,7 +578,7 @@ def api_chat_stream():
                         model=text_model,
                     ):
                         full_response += chunk
-                        yield f"data: {chunk}\n\n"
+                        yield _sse_data(chunk)
 
             elif PILOT_ENABLED and pilot:
                 # Streaming via Pilot (con eventuale pianificazione ReAct)
@@ -578,7 +590,7 @@ def api_chat_stream():
                     images=images,
                 ):
                     full_response += chunk
-                    yield f"data: {chunk}\n\n"
+                    yield _sse_data(chunk)
             else:
                 for chunk in ai_engine.generate_response_stream(
                     user_message, 
@@ -587,10 +599,11 @@ def api_chat_stream():
                     images=images,
                 ):
                     full_response += chunk
-                    yield f"data: {chunk}\n\n"
+                    yield _sse_data(chunk)
             
             # Salva la risposta completa
             memory.add_message_advanced(conv_id, 'assistant', full_response, extract_entities=False)
+            response_saved = True
             
             # Invia segnale di fine
             yield f"event: end\ndata: {conv_id}\n\n"
@@ -598,13 +611,23 @@ def api_chat_stream():
         except Exception as e:
             logger.error("Errore streaming: %s", e, exc_info=True)
             yield f"event: error\ndata: Errore interno del server\n\n"
+        finally:
+            # P1-8: salva risposta parziale anche in caso di errore
+            if not response_saved and full_response.strip():
+                try:
+                    memory.add_message_advanced(
+                        conv_id, 'assistant', full_response, extract_entities=False
+                    )
+                except Exception:
+                    logger.warning("Impossibile salvare risposta parziale")
     
     return Response(
         stream_with_context(generate()),
         mimetype='text/event-stream',
         headers={
             'Cache-Control': 'no-cache',
-            'X-Accel-Buffering': 'no'
+            'X-Accel-Buffering': 'no',
+            'Connection': 'keep-alive',
         }
     )
 
@@ -879,7 +902,8 @@ def api_change_model():
     if not new_model:
         return jsonify({'error': 'Nessun modello specificato'}), 400
     
-    success = ai_engine.change_model(new_model)
+    with _model_lock:
+        success = ai_engine.change_model(new_model)
     
     return jsonify({
         'success': success,

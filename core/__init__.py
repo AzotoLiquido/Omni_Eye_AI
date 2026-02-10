@@ -2,11 +2,24 @@
 Core Package - Motore AI di Omni Eye
 """
 
-from .ai_engine import AIEngine
+# P3-18: Lazy imports to avoid loading heavy modules at package import
 from .memory import ConversationMemory
 from .document_processor import DocumentProcessor
 
-__all__ = ['AIEngine', 'ConversationMemory', 'DocumentProcessor']
+
+def __getattr__(name):
+    """Lazy import for AIEngine and AdvancedMemory"""
+    if name == 'AIEngine':
+        from .ai_engine import AIEngine
+        return AIEngine
+    if name == 'AdvancedMemory':
+        from .advanced_memory import AdvancedMemory
+        return AdvancedMemory
+    raise AttributeError(f"module 'core' has no attribute {name!r}")
+
+
+# P3-19: Include AdvancedMemory in __all__
+__all__ = ['AIEngine', 'ConversationMemory', 'DocumentProcessor', 'AdvancedMemory']
 
 # Lazy import del Pilot (non fallisce se la config manca)
 def get_pilot(*args, **kwargs):

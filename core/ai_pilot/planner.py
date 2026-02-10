@@ -28,9 +28,9 @@ RE_THOUGHT = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
-# Cattura: Azione: tool_name({...}) o Action: tool_name({...})
+# P1-7: Use greedy match .*  to capture to LAST ')' on line, handling nested parens in JSON
 RE_ACTION = re.compile(
-    r"(?:Azione|Action)\s*:\s*(\w+)\s*\((.+?)\)\s*$",
+    r"(?:Azione|Action)\s*:\s*(\w+)\s*\((.*)\)\s*$",
     re.MULTILINE | re.IGNORECASE,
 )
 
@@ -163,7 +163,11 @@ class ReActPlanner:
             return ""
 
         result = self.tool_executor.execute(step.action, step.action_params)
-        step.observation = str(result)
+        # P1-8: Preserve ToolResult.success in observation prefix
+        if result.success:
+            step.observation = result.output
+        else:
+            step.observation = f"ERRORE [{result.tool_id}]: {result.error}"
         self.steps.append(step)
 
         return step.observation
@@ -212,11 +216,16 @@ class ReActPlanner:
         except json.JSONDecodeError:
             pass
 
-        # Caso 2: JSON con apici singoli → sostituisci
+        # Caso 2: JSON con apici singoli → sostituisci solo quelli che delimitano
+        # chiavi/valori (non apostrofi dentro le parole)
+        # P2: Smarter quote replacement to avoid corrupting Italian apostrophes
         try:
-            fixed = raw.replace("'", '"')
-            return json.loads(fixed)
-        except json.JSONDecodeError:
+            # Replace only single quotes adjacent to JSON structural chars
+            fixed = re.sub(r"(?<=[:,\[{])\s*'|'\s*(?=[}\]:,])", '"', raw)
+            # Also handle opening quote at start
+            if fixed.startswith("{") or fixed.startswith("["):
+                return json.loads(fixed)
+        except (json.JSONDecodeError, ValueError):
             pass
 
         # Caso 3: Singolo valore stringa → parametro "query" o "path"
@@ -266,7 +275,11 @@ class ReActPlanner:
                             return tool_id, {"action": "search", "query": quoted[0]}
                         elif tool_id == "py":
                             return tool_id, {"code": quoted[0]}
-                    # Nessun parametro trovato
+                    # Nessun parametro trovato - return hint instead of empty dict
+                    if tool_id == "fs":
+                        return tool_id, {"action": "list", "path": "."}
+                    elif tool_id == "db":
+                        return tool_id, {"action": "search", "query": ""}
                     return tool_id, {}
 
         return None, {}

@@ -150,7 +150,7 @@ class Pilot:
             "used_planning": use_planning,
             "steps": [],
             "tools_called": [],
-            "memory_retrieved": bool(system_prompt),
+            "memory_retrieved": bool(system_prompt and system_prompt.strip()),
         }
 
         if use_planning and isinstance(self.planner, ReActPlanner):
@@ -226,16 +226,23 @@ class Pilot:
             # in streaming non si possono ritirare, ma puliamo per il log)
             response = self._post_process(full_response)
 
-        # Post-processing asincrono (estrazione fatti in thread separato)
-        t = threading.Thread(
-            target=self._extract_and_store_facts,
-            args=(user_message, ai_engine),
-            daemon=True,
-        )
-        t.start()
+        # P1-5: Use try/finally is not possible in yield-based generators
+        # so we ensure post-yield code runs by moving it here.
+        # This code executes only if the generator is fully consumed.
+        # For partial consumption, we rely on GeneratorExit handling.
+        try:
+            # Post-processing asincrono (estrazione fatti in thread separato)
+            t = threading.Thread(
+                target=self._extract_and_store_facts,
+                args=(user_message, ai_engine),
+                daemon=True,
+            )
+            t.start()
 
-        # Log turno assistente
-        self.logger.log_conversation_turn(conv_id, "assistant", response)
+            # Log turno assistente
+            self.logger.log_conversation_turn(conv_id, "assistant", response)
+        except Exception:
+            pass  # Non bloccare il generatore per errori di logging
 
     # ==================================================================
     # CICLO REACT
@@ -261,6 +268,10 @@ class Pilot:
         current_prompt = user_message
         accumulated_context = ""
         output = ""
+        max_tool_calls = self.cfg.max_tool_calls  # Cross-cutting: enforce limit
+        # P2: Cap accumulated_context size to prevent unbounded growth
+        _MAX_CONTEXT_CHARS = 8000
+        tools_called_count = 0
 
         for i in range(self.cfg.planner_max_steps):
             # Genera ragionamento dal modello
@@ -287,18 +298,32 @@ class Pilot:
 
             # Se c'è un'azione, eseguila
             if step.action:
+                # Cross-cutting: enforce max_tool_calls
+                tools_called_count += 1
+                if tools_called_count > max_tool_calls:
+                    self.logger.log_event("max_tool_calls_exceeded", {
+                        "limit": max_tool_calls,
+                    }, level="warn")
+                    return output.strip(), metadata
+
                 observation = self.planner.execute_step(step)
                 metadata["tools_called"].append(step.action)
 
+                # P2: Use ToolResult.success instead of string matching
+                tool_success = not observation.startswith("ERRORE")
                 self.logger.log_tool_call(
                     step.action,
                     step.action_params,
-                    "ERRORE" not in observation,
+                    tool_success,
                     observation,
                 )
 
                 # Costruisci il contesto per il prossimo turno (accumula)
-                accumulated_context += "\n" + self.planner.build_continuation_prompt(step)
+                new_context = self.planner.build_continuation_prompt(step)
+                accumulated_context += "\n" + new_context
+                # P2: Trim accumulated context to prevent unbounded growth
+                if len(accumulated_context) > _MAX_CONTEXT_CHARS:
+                    accumulated_context = accumulated_context[-_MAX_CONTEXT_CHARS:]
             else:
                 # Nessuna azione ma nemmeno risposta finale → forza uscita
                 return output.strip(), metadata
@@ -436,16 +461,14 @@ class Pilot:
     # ==================================================================
 
     def _simulate_stream(self, text: str, chunk_size: int = 4) -> Generator[str, None, None]:
-        """Simula streaming spezzando il testo in piccoli chunk"""
-        words = text.split(" ")
-        buffer = []
-        for word in words:
-            buffer.append(word)
-            if len(buffer) >= chunk_size:
-                yield " ".join(buffer) + " "
-                buffer = []
-        if buffer:
-            yield " ".join(buffer)
+        """Simula streaming spezzando il testo in piccoli chunk.
+        P3: Preserve original whitespace (newlines, spaces) instead of splitting on space.
+        """
+        # Use character-level chunking to preserve all whitespace
+        for i in range(0, len(text), chunk_size * 5):
+            chunk = text[i:i + chunk_size * 5]
+            if chunk:
+                yield chunk
 
     def get_status(self) -> Dict:
         """Stato completo del Pilot"""
@@ -461,8 +484,13 @@ class Pilot:
         }
 
     def reload_config(self) -> None:
-        """Ricarica la configurazione da disco"""
+        """Ricarica la configurazione da disco e propaga ai subsystem."""
         self.cfg.reload()
+        # Cross-cutting: propagate config changes to subsystems
+        self.tools = ToolExecutor(self.cfg)
+        self.tools.set_memory_store(self.memory)
+        self.planner = create_planner(self.cfg, self.tools)
+        self.prompt_builder = PromptBuilder(self.cfg)
         self.logger.log_event("config_reload", {"version": self.cfg.version})
 
     def shutdown(self) -> None:

@@ -27,8 +27,13 @@ class ContextManager:
         self.max_context_tokens = max_context_tokens
         
     def estimate_tokens(self, text: str) -> int:
-        """Stima approssimativa dei token (1 token â‰ˆ 4 caratteri)"""
-        return len(text) // 4
+        """Stima approssimativa dei token.
+        P3-13: Slightly better estimate: count words + punctuation overhead.
+        Still rough but better than pure char/4.
+        """
+        # Average: ~1.3 tokens per word for English/Italian
+        words = len(text.split())
+        return max(words, len(text) // 4)
     
     def calculate_messages_tokens(self, messages: List[Dict]) -> int:
         """Calcola il totale dei token nei messaggi"""
@@ -74,6 +79,16 @@ class ContextManager:
             ]
             compressed.extend(recent_messages)
             return compressed
+        
+        # P1-2: Even with ≤6 messages, if over token limit, truncate content
+        # to fit within budget by trimming oldest messages
+        recent_tokens = self.calculate_messages_tokens(recent_messages)
+        if recent_tokens > self.max_context_tokens and len(recent_messages) > 2:
+            # Progressively drop oldest recent messages until under limit
+            while len(recent_messages) > 2:
+                recent_messages = recent_messages[1:]
+                if self.calculate_messages_tokens(recent_messages) <= self.max_context_tokens:
+                    break
         
         return recent_messages
     
@@ -174,8 +189,7 @@ class EntityTracker:
             self._extract_names(message, timestamp)
             self._extract_preferences(message, timestamp)
             self._extract_dates(message, timestamp)
-        
-        self._save_entities()
+            self._save_entities()  # P2-5: save inside lock to avoid gap
     
     def _extract_names(self, text: str, timestamp: str) -> None:
         """Estrae nomi propri dal testo con pattern espliciti"""
@@ -193,8 +207,9 @@ class EntityTracker:
             'domani', 'ieri', 'perchÃ©', 'quando', 'dove', 'quindi',
         }
         
+        # P3-14: Removed re.IGNORECASE since patterns explicitly require uppercase first letter
         for pattern in name_patterns:
-            matches = re.findall(pattern, text, re.IGNORECASE)
+            matches = re.findall(pattern, text)
             for name in matches:
                 name = name.strip('.,!?;:')
                 if len(name) <= 2 or name.lower() in STOP_NAMES:
@@ -333,8 +348,9 @@ class KnowledgeBase:
         tmp_path = self.storage_path + ".tmp"
         try:
             os.makedirs(os.path.dirname(self.storage_path), exist_ok=True)
-            self.knowledge['last_updated'] = datetime.now().isoformat()
             with self._lock:
+                # P2-3: Mutate last_updated INSIDE the lock
+                self.knowledge['last_updated'] = datetime.now().isoformat()
                 with open(tmp_path, 'w', encoding='utf-8') as f:
                     json.dump(self.knowledge, f, ensure_ascii=False, indent=2)
                 os.replace(tmp_path, self.storage_path)
@@ -348,22 +364,30 @@ class KnowledgeBase:
             return False
     
     def update_from_conversation(self, messages: List[Dict]) -> None:
-        """Aggiorna la knowledge base dai messaggi della conversazione"""
+        """Aggiorna la knowledge base dai messaggi della conversazione.
         
-        for msg in messages:
-            if msg['role'] == 'user':
-                content_lower = msg['content'].lower()
-                
-                # Estrai il nome dell'utente
-                if 'mi chiamo' in content_lower or 'sono' in content_lower:
-                    self._extract_user_name(msg['content'])
-                
-                # Estrai interessi
-                if any(word in content_lower for word in ['interessa', 'piace', 'passione']):
-                    self._extract_interests(msg['content'])
-                
-                # Conta i topic
-                self._count_topics(msg['content'])
+        P1-1: Reset topic counters from scratch to avoid double-counting
+        when called with all messages every 5 messages.
+        P2-4: Hold lock during knowledge modification.
+        """
+        with self._lock:
+            # Reset topic counters before re-counting all messages
+            self.knowledge['topics_discussed'] = {}
+            
+            for msg in messages:
+                if msg['role'] == 'user':
+                    content_lower = msg['content'].lower()
+                    
+                    # Estrai il nome dell'utente
+                    if 'mi chiamo' in content_lower or 'sono' in content_lower:
+                        self._extract_user_name(msg['content'])
+                    
+                    # Estrai interessi
+                    if any(word in content_lower for word in ['interessa', 'piace', 'passione']):
+                        self._extract_interests(msg['content'])
+                    
+                    # Conta i topic
+                    self._count_topics(msg['content'])
         
         self._save_knowledge()
     

@@ -49,15 +49,24 @@ class AuditLogger:
         self._events_path.parent.mkdir(parents=True, exist_ok=True)
         self._conversations_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Buffer di scrittura (protetto da lock per thread safety)
-        self._buf_lock = threading.Lock()
+        # Buffer di scrittura (protetto da RLock per thread safety)
+        # P1-12: Use RLock instead of Lock to prevent deadlock when
+        # _flush_buffer is called from flush() which already holds the lock
+        self._buf_lock = threading.RLock()
         self._buffers: Dict[Path, List[str]] = {
             self._events_path: [],
             self._conversations_path: [],
         }
 
         # Flush automatico alla chiusura del processo
-        atexit.register(self.flush)
+        # P2: Use weak reference approach to avoid preventing GC
+        import weakref
+        _weak_self = weakref.ref(self)
+        def _atexit_flush():
+            obj = _weak_self()
+            if obj is not None:
+                obj.flush()
+        atexit.register(_atexit_flush)
 
         # Setup logger Python standard (per console)
         self._logger = logging.getLogger("ai_pilot")

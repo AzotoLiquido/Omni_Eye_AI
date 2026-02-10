@@ -17,7 +17,7 @@ from .config_loader import PilotConfig
 from .memory_store import MemoryStore
 from .tool_executor import ToolExecutor, ToolResult
 from .prompt_builder import PromptBuilder
-from .planner import ReActPlanner, SimplePlanner, create_planner
+from .planner import ReActPlanner, SimplePlanner, PlanStep, create_planner
 from .audit_logger import AuditLogger
 
 __all__ = [
@@ -29,6 +29,7 @@ __all__ = [
     "ToolResult",
     "ReActPlanner",
     "SimplePlanner",
+    "PlanStep",
     "AuditLogger",
     "create_planner",
 ]

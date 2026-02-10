@@ -31,10 +31,17 @@ class MemoryStore:
 
         self._db_path = str(db_path)
         self._conn: Optional[sqlite3.Connection] = None
-        self._lock = threading.Lock()  # Protezione per scritture concorrenti
+        self._lock = threading.RLock()  # P1-13: RLock for safe nested reads
         self._connect()
         self._init_tables()
-        atexit.register(self.close)
+        # P2: Use weak reference to avoid preventing GC
+        import weakref
+        _weak_self = weakref.ref(self)
+        def _atexit_close():
+            obj = _weak_self()
+            if obj is not None:
+                obj.close()
+        atexit.register(_atexit_close)
 
     # ------------------------------------------------------------------
     # Connessione
@@ -168,43 +175,68 @@ class MemoryStore:
             self._conn.commit()
             return cur.lastrowid
 
+    @staticmethod
+    def _sanitize_fts_query(query: str) -> str:
+        """Escape special FTS5 characters to prevent query injection.
+        
+        P1-14/P1-15: FTS5 operators like *, OR, NOT, NEAR, + can cause
+        OperationalError. We quote each term to disable operators.
+        """
+        if not query or not query.strip():
+            return '""'
+        # Remove FTS5 special chars and wrap each word in double quotes
+        words = query.split()
+        # Escape double quotes within words, then quote each word
+        safe_words = []
+        for w in words:
+            w = w.replace('"', '')
+            w = w.strip('*+-~^')
+            if w:
+                safe_words.append(f'"{w}"')
+        return ' '.join(safe_words) if safe_words else '""'
+
     def get_fact(self, key: str) -> Optional[Dict]:
         """Recupera un fatto per chiave esatta"""
-        row = self._conn.execute(
-            "SELECT * FROM facts WHERE key = ?", (key,)
-        ).fetchone()
+        with self._lock:  # P1-13: lock reads too
+            row = self._conn.execute(
+                "SELECT * FROM facts WHERE key = ?", (key,)
+            ).fetchone()
         return dict(row) if row else None
 
     def search_facts(self, query: str, limit: int = None) -> List[Dict]:
         """Ricerca full-text tra i fatti"""
         limit = limit or self.cfg.retrieval_top_k
-        try:
-            rows = self._conn.execute(
-                "SELECT f.*, rank FROM facts_fts "
-                "JOIN facts f ON facts_fts.rowid = f.id "
-                "WHERE facts_fts MATCH ? "
-                "ORDER BY rank LIMIT ?",
-                (query, limit)
-            ).fetchall()
-            return [dict(r) for r in rows]
-        except sqlite3.OperationalError:
-            # Fallback: ricerca LIKE
-            return self._search_facts_like(query, limit)
+        safe_query = self._sanitize_fts_query(query)
+        with self._lock:  # P1-13: lock reads
+            try:
+                rows = self._conn.execute(
+                    "SELECT f.*, rank FROM facts_fts "
+                    "JOIN facts f ON facts_fts.rowid = f.id "
+                    "WHERE facts_fts MATCH ? "
+                    "ORDER BY rank LIMIT ?",
+                    (safe_query, limit)
+                ).fetchall()
+                return [dict(r) for r in rows]
+            except sqlite3.OperationalError:
+                # Fallback: ricerca LIKE
+                return self._search_facts_like(query, limit)
 
     def _search_facts_like(self, query: str, limit: int) -> List[Dict]:
         pattern = f"%{query}%"
-        rows = self._conn.execute(
-            "SELECT * FROM facts WHERE key LIKE ? OR value LIKE ? "
-            "ORDER BY updated_at DESC LIMIT ?",
-            (pattern, pattern, limit)
-        ).fetchall()
+        with self._lock:  # P1-13: lock reads
+            rows = self._conn.execute(
+                "SELECT * FROM facts WHERE key LIKE ? OR value LIKE ? "
+                "ORDER BY updated_at DESC LIMIT ?",
+                (pattern, pattern, limit)
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def get_all_facts(self) -> List[Dict]:
         """Restituisce tutti i fatti"""
-        rows = self._conn.execute(
-            "SELECT * FROM facts ORDER BY updated_at DESC"
-        ).fetchall()
+        with self._lock:  # P1-13: lock reads
+            rows = self._conn.execute(
+                "SELECT * FROM facts ORDER BY updated_at DESC"
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def delete_fact(self, fact_id: int) -> bool:
@@ -240,15 +272,17 @@ class MemoryStore:
         return cur.rowcount > 0
 
     def get_open_tasks(self) -> List[Dict]:
-        rows = self._conn.execute(
-            "SELECT * FROM tasks WHERE status = 'open' ORDER BY created_at DESC"
-        ).fetchall()
+        with self._lock:  # P1-13: lock reads
+            rows = self._conn.execute(
+                "SELECT * FROM tasks WHERE status = 'open' ORDER BY created_at DESC"
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def get_all_tasks(self) -> List[Dict]:
-        rows = self._conn.execute(
-            "SELECT * FROM tasks ORDER BY created_at DESC"
-        ).fetchall()
+        with self._lock:  # P1-13: lock reads
+            rows = self._conn.execute(
+                "SELECT * FROM tasks ORDER BY created_at DESC"
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def delete_task(self, task_id: int) -> bool:
@@ -295,23 +329,25 @@ class MemoryStore:
     def search_documents(self, query: str, limit: int = None) -> List[Dict]:
         """Ricerca full-text nei documenti"""
         limit = limit or self.cfg.retrieval_top_k
-        try:
-            rows = self._conn.execute(
-                "SELECT d.*, rank FROM documents_fts "
-                "JOIN documents d ON documents_fts.rowid = d.id "
-                "WHERE documents_fts MATCH ? "
-                "ORDER BY rank LIMIT ?",
-                (query, limit)
-            ).fetchall()
-            return [dict(r) for r in rows]
-        except sqlite3.OperationalError:
-            pattern = f"%{query}%"
-            rows = self._conn.execute(
-                "SELECT * FROM documents WHERE content LIKE ? "
-                "ORDER BY created_at DESC LIMIT ?",
-                (pattern, limit)
-            ).fetchall()
-            return [dict(r) for r in rows]
+        safe_query = self._sanitize_fts_query(query)
+        with self._lock:  # P1-13: lock reads
+            try:
+                rows = self._conn.execute(
+                    "SELECT d.*, rank FROM documents_fts "
+                    "JOIN documents d ON documents_fts.rowid = d.id "
+                    "WHERE documents_fts MATCH ? "
+                    "ORDER BY rank LIMIT ?",
+                    (safe_query, limit)
+                ).fetchall()
+                return [dict(r) for r in rows]
+            except sqlite3.OperationalError:
+                pattern = f"%{query}%"
+                rows = self._conn.execute(
+                    "SELECT * FROM documents WHERE content LIKE ? "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (pattern, limit)
+                ).fetchall()
+                return [dict(r) for r in rows]
 
     def delete_document(self, path: str) -> int:
         """Rimuove tutti i chunk di un documento"""
@@ -370,6 +406,10 @@ class MemoryStore:
         max_chars = self.cfg.chunking_max_chars
         overlap = self.cfg.chunking_overlap
 
+        # P2: Guard against max_chars=0 or invalid values
+        if max_chars <= 0:
+            max_chars = 2000
+
         # Guardia contro loop infinito
         if overlap >= max_chars:
             overlap = max(0, max_chars - 1)
@@ -382,6 +422,13 @@ class MemoryStore:
         while start < len(text):
             end = start + max_chars
             chunk = text[start:end]
+            # P2: Try to split at word boundary instead of mid-word
+            if end < len(text) and chunk and not chunk[-1].isspace() and not text[end:end+1].isspace():
+                # Look back for a space in last 20% of chunk
+                boundary = chunk.rfind(' ', int(max_chars * 0.8))
+                if boundary > 0:
+                    chunk = chunk[:boundary]
+                    end = start + boundary
             chunks.append(chunk)
             start = end - overlap
 
@@ -389,9 +436,10 @@ class MemoryStore:
 
     def get_stats(self) -> Dict:
         """Statistiche sulla memoria"""
-        facts_count = self._conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
-        tasks_count = self._conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
-        docs_count = self._conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        with self._lock:  # P1-13: lock reads
+            facts_count = self._conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+            tasks_count = self._conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+            docs_count = self._conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
         return {
             "facts": facts_count,
             "tasks": tasks_count,
@@ -400,9 +448,10 @@ class MemoryStore:
         }
 
     def close(self) -> None:
-        if self._conn:
-            self._conn.close()
-            self._conn = None
+        with self._lock:  # P3: lock close
+            if self._conn:
+                self._conn.close()
+                self._conn = None
 
     def __del__(self):
         try:

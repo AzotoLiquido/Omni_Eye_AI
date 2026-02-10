@@ -11,7 +11,15 @@ from pathlib import Path
 # Usa la directory del modulo stesso (su Windows AI-Pilot e ai_pilot sono lo stesso path)
 _CODE_DIR = Path(__file__).resolve().parent
 _ALT_DIR = _CODE_DIR.parent / "AI-Pilot"
-CONFIG_DIR = _CODE_DIR if (_CODE_DIR / "assistant.config.json").exists() else _ALT_DIR
+
+# P1-11: Verify file actually exists in fallback directory
+if (_CODE_DIR / "assistant.config.json").exists():
+    CONFIG_DIR = _CODE_DIR
+elif (_ALT_DIR / "assistant.config.json").exists():
+    CONFIG_DIR = _ALT_DIR
+else:
+    CONFIG_DIR = _CODE_DIR  # Will raise FileNotFoundError later
+
 SCHEMA_PATH = CONFIG_DIR / "assistant.schema.json"
 CONFIG_PATH = CONFIG_DIR / "assistant.config.json"
 
@@ -121,11 +129,14 @@ class PilotConfig:
 
     @property
     def model_id(self) -> str:
-        rt = self._raw["runtime"]
+        rt = self._raw.get("runtime", {})
         # Flat: runtime.model_id  — Nested: runtime.model.id
         if "model_id" in rt:
             return rt["model_id"]
-        return rt["model"]["id"]
+        model = rt.get("model", {})
+        if isinstance(model, dict) and "id" in model:
+            return model["id"]
+        return "unknown"  # P3: safe fallback instead of KeyError
 
     @property
     def temperature(self) -> float:
@@ -186,16 +197,17 @@ class PilotConfig:
             return p["tone"]
         return p.get("style", {}).get("tone", "friendly")
 
+    # P3: Class-level constant, not reallocated on every access
+    _STR_MAP = {"minimal": 0, "low": 1, "brief": 2, "normal": 3,
+                "balanced": 5, "detailed": 7, "verbose": 10}
+
     @property
     def verbosity(self):
         p = self._raw["persona"]
         val = p.get("verbosity", p.get("style", {}).get("verbosity", 2))
         if isinstance(val, int):
             return val
-        # Mappa stringhe → livelli numerici
-        _STR_MAP = {"minimal": 0, "low": 1, "brief": 2, "normal": 3,
-                     "balanced": 5, "detailed": 7, "verbose": 10}
-        return _STR_MAP.get(str(val).lower(), 3)
+        return self._STR_MAP.get(str(val).lower(), 3)
 
     @property
     def formatting(self) -> Dict:
@@ -430,8 +442,19 @@ class PilotConfig:
         return self.tool_routing_default
 
     def reload(self) -> None:
-        """Ricarica la config da disco"""
-        self._load()
+        """Ricarica la config da disco.
+        
+        P2: Load into temp variables first, then swap atomically
+        so a parse error doesn't leave config in partial state.
+        """
+        old_raw = self._raw
+        old_schema = self._schema
+        try:
+            self._load()
+        except Exception:
+            self._raw = old_raw
+            self._schema = old_schema
+            raise
 
     def __repr__(self) -> str:
         return f"<PilotConfig name={self.name!r} v{self.version} engine={self.engine}>"
