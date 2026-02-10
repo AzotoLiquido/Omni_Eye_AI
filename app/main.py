@@ -164,13 +164,14 @@ def api_chat():
         history = history[:-1]
     
     # ── Ricerca web automatica (se il messaggio lo richiede) ──
-    web_context = search_and_format(user_message)
+    web_search_data_sync = search_and_format(user_message)
+    web_context_sync = web_search_data_sync["model"] if web_search_data_sync else None
     
     # System prompt: Pilot (se attivo) oppure fallback config.py
     if PILOT_ENABLED and pilot:
         extra = additional_context
-        if web_context:
-            extra = web_context + "\n" + (extra or "")
+        if web_context_sync:
+            extra = web_context_sync + "\n" + (extra or "")
         system_prompt = pilot.build_system_prompt(
             user_message=user_message,
             extra_instructions=extra,
@@ -179,12 +180,12 @@ def api_chat():
         system_prompt = config.SYSTEM_PROMPT
         if additional_context:
             system_prompt = additional_context + "\n" + system_prompt
-        if web_context:
-            system_prompt = web_context + "\n" + system_prompt
+        if web_context_sync:
+            system_prompt = web_context_sync + "\n" + system_prompt
     
     # Genera risposta
     try:
-        if PILOT_ENABLED and pilot and not web_context:
+        if PILOT_ENABLED and pilot and not web_context_sync:
             response, meta = pilot.process(
                 user_message,
                 conversation_history=history,
@@ -198,6 +199,10 @@ def api_chat():
                 system_prompt=system_prompt
             )
             meta = {}
+        
+        # Prependi risultati ricerca se presenti
+        if web_search_data_sync:
+            response = web_search_data_sync["user"] + "\n\n" + response
         
         # Salva risposta (senza estrazione entità per l'assistant)
         memory.add_message_advanced(conv_id, 'assistant', response, extract_entities=False)
@@ -295,7 +300,8 @@ def api_chat_stream():
     image_memory = "\n".join(image_context_parts) if image_context_parts else ""
     
     # ── Ricerca web automatica (se il messaggio lo richiede) ──
-    web_context = search_and_format(user_message) if not images else None
+    web_search_data = search_and_format(user_message) if not images else None
+    web_context = web_search_data["model"] if web_search_data else None
     
     # System prompt: Pilot (se attivo) oppure fallback
     if PILOT_ENABLED and pilot:
@@ -323,6 +329,14 @@ def api_chat_stream():
         response_saved = False
         
         try:
+            # ── Risultati ricerca web: stream diretto all'utente ──
+            # I link reali vengono inviati PRIMA della risposta AI,
+            # così non passano dal modello che li corromperebbe.
+            if web_search_data:
+                user_results = web_search_data["user"]
+                full_response += user_results + "\n\n"
+                yield _sse_data(user_results + "\n\n")
+
             # Auto-switch a modello vision se ci sono immagini
             # P0-1: NON mutiamo più ai_engine.model/.temperature
             #       usiamo variabili locali + parametri model=/temperature= nei metodi

@@ -120,14 +120,7 @@ def web_search(
 
 def format_search_results(results: List[Dict[str, str]], query: str = "") -> str:
     """
-    Formatta i risultati di ricerca come testo da iniettare nel contesto AI.
-
-    Args:
-        results: Lista di risultati da web_search()
-        query: Query originale (per contesto)
-
-    Returns:
-        Stringa formattata con i risultati
+    Formatta i risultati per il contesto AI (il modello NON deve riprodurre gli URL).
     """
     if not results:
         return (
@@ -136,21 +129,35 @@ def format_search_results(results: List[Dict[str, str]], query: str = "") -> str
             + ". Informa l'utente che la ricerca non ha prodotto risultati."
         )
 
-    lines = [f"[RICERCA WEB] Risultati per: {query}" if query else "[RICERCA WEB]"]
+    lines = ["[RICERCA WEB] I risultati di ricerca sono già stati mostrati all'utente."]
+    lines.append("NON ripetere i link. NON inventare URL. Limita la tua risposta a un")
+    lines.append("breve commento o consiglio utile riguardo la ricerca dell'utente.")
+    lines.append(f"L'utente cercava: {query}" if query else "")
+    return "\n".join(lines)
+
+
+def format_search_results_user(results: List[Dict[str, str]], query: str = "") -> str:
+    """
+    Formatta i risultati come Markdown da mostrare direttamente all'utente.
+    Gli URL sono reali e cliccabili.
+    """
+    if not results:
+        return f"Nessun risultato trovato per: *{query}*" if query else "Nessun risultato trovato."
+
+    lines = []
     for i, r in enumerate(results, 1):
         title = r.get("title", "Senza titolo")
         url = r.get("url", "")
         snippet = r.get("snippet", "")
-        lines.append(f"{i}. **{title}**")
         if url:
-            lines.append(f"   URL: {url}")
+            lines.append(f"{i}. [{title}]({url})")
+        else:
+            lines.append(f"{i}. {title}")
         if snippet:
-            lines.append(f"   {snippet[:200]}")
-    lines.append("")
-    lines.append(
-        "ISTRUZIONE: Usa SOLO i link sopra nella tua risposta. "
-        "NON inventare o modificare URL. Se nessun risultato è pertinente, dillo."
-    )
+            # Tronca snippet e rimuovi newline
+            clean_snippet = snippet[:180].replace("\n", " ").strip()
+            if clean_snippet:
+                lines.append(f"   {clean_snippet}")
     return "\n".join(lines)
 
 
@@ -171,4 +178,10 @@ def search_and_format(message: str, max_results: int = 5) -> Optional[str]:
     youtube = is_youtube_query(message)
     clean_q = _clean_query(message)
     results = web_search(clean_q, max_results=max_results, youtube=youtube)
-    return format_search_results(results, query=message)
+    if not results:
+        return None
+    return {
+        "user": format_search_results_user(results, query=message),
+        "model": format_search_results(results, query=message),
+        "empty": len(results) == 0,
+    }
