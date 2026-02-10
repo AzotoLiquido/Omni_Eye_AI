@@ -10,6 +10,7 @@ from flask_wtf import CSRFProtect
 import logging
 import os
 import sys
+import re as _re
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,9 @@ from core import AIEngine, DocumentProcessor
 from core.advanced_memory import AdvancedMemory
 from core.ai_pilot import Pilot
 import config
+
+# Regex per validazione ID conversazione (anti path-traversal)
+_SAFE_CONV_ID = _re.compile(r'^[a-zA-Z0-9_-]+$')
 
 app = Flask(__name__)
 app.secret_key = config.SECRET_KEY
@@ -259,12 +263,18 @@ def api_chat():
     Gestisce una singola richiesta chat e restituisce la risposta completa.
     Utilizza il sistema di memoria avanzata per contesto e learning.
     """
-    data = request.json
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'error': 'Nessun dato ricevuto'}), 400
     user_message = data.get('message', '').strip()
     conv_id = data.get('conversation_id')
     
     if not user_message:
         return jsonify({'error': 'Messaggio vuoto'}), 400
+    
+    # Validazione conv_id
+    if conv_id and not _SAFE_CONV_ID.match(conv_id):
+        return jsonify({'error': 'ID conversazione non valido'}), 400
     
     # Crea nuova conversazione se necessario
     if not conv_id:
@@ -319,8 +329,9 @@ def api_chat():
         })
     
     except Exception as e:
+        logger.error("Errore api_chat: %s", e, exc_info=True)
         return jsonify({
-            'error': str(e),
+            'error': 'Errore interno del server',
             'success': False
         }), 500
 
@@ -342,6 +353,10 @@ def api_chat_stream():
         user_message = data.get('message', '').strip()
         conv_id = data.get('conversation_id')
         raw_images = data.get('images')  # Lista di stringhe base64 (per modelli vision)
+
+        # Validazione conv_id
+        if conv_id and not _SAFE_CONV_ID.match(conv_id):
+            return jsonify({'error': 'ID conversazione non valido'}), 400
 
         # ── Validazione immagini (P0-2) ──
         images = None
@@ -581,7 +596,8 @@ def api_chat_stream():
             yield f"event: end\ndata: {conv_id}\n\n"
             
         except Exception as e:
-            yield f"event: error\ndata: {str(e)}\n\n"
+            logger.error("Errore streaming: %s", e, exc_info=True)
+            yield f"event: error\ndata: Errore interno del server\n\n"
     
     return Response(
         stream_with_context(generate()),
@@ -602,8 +618,11 @@ def api_list_conversations():
 
 
 @app.route('/api/conversations/<conv_id>', methods=['GET'])
+@limiter.limit(config.RATE_LIMIT_CONFIG['limits']['conversations'])
 def api_get_conversation(conv_id):
     """Ottiene una conversazione specifica"""
+    if not _SAFE_CONV_ID.match(conv_id):
+        return jsonify({'error': 'ID conversazione non valido'}), 400
     conversation = memory.load_conversation(conv_id)
     
     if not conversation:
@@ -613,8 +632,11 @@ def api_get_conversation(conv_id):
 
 
 @app.route('/api/conversations/<conv_id>', methods=['DELETE'])
+@limiter.limit(config.RATE_LIMIT_CONFIG['limits']['conversations'])
 def api_delete_conversation(conv_id):
     """Elimina una conversazione"""
+    if not _SAFE_CONV_ID.match(conv_id):
+        return jsonify({'error': 'ID conversazione non valido'}), 400
     success = memory.delete_conversation(conv_id)
     
     if success:
@@ -688,8 +710,7 @@ def api_upload_document():
         'success': True,
         'text': text[:5000],  # Prime 5000 caratteri come preview
         'full_length': len(text),
-        'file_info': file_info,
-        'filepath': filepath
+        'file_info': file_info
     })
 
 
@@ -700,7 +721,9 @@ def api_analyze_document():
     Permette di fare domande specifiche su un documento caricato.
     L'AI genera una risposta basata sul contenuto del documento.
     """
-    data = request.json
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'error': 'Nessun dato ricevuto'}), 400
     document_text = data.get('text', '')
     question = data.get('question')
     
@@ -716,8 +739,9 @@ def api_analyze_document():
         })
     
     except Exception as e:
+        logger.error("Errore analyze-document: %s", e, exc_info=True)
         return jsonify({
-            'error': str(e),
+            'error': 'Errore interno del server',
             'success': False
         }), 500
 
@@ -765,7 +789,9 @@ def api_knowledge_summary():
 @limiter.limit(config.RATE_LIMIT_CONFIG['limits']['knowledge'])
 def api_knowledge_search():
     """Cerca informazioni nella knowledge base"""
-    data = request.json
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'error': 'Nessun dato ricevuto'}), 400
     query = data.get('query', '').strip()
     
     if not query:
@@ -808,12 +834,20 @@ def api_optimize_memory():
     if not conv_id:
         return jsonify({'error': 'Nessuna conversazione attiva'}), 400
     
+    # Validazione conv_id
+    if not _SAFE_CONV_ID.match(conv_id):
+        return jsonify({'error': 'ID conversazione non valido'}), 400
+    
     # Ottieni contesto ottimizzato
     optimized_messages, additional_context = memory.get_smart_context(conv_id, ai_engine)
     
+    conv_data = memory.load_conversation(conv_id)
+    if not conv_data:
+        return jsonify({'error': 'Conversazione non trovata'}), 404
+    
     return jsonify({
         'success': True,
-        'original_messages_count': len(memory.load_conversation(conv_id).get('messages', [])),
+        'original_messages_count': len(conv_data.get('messages', [])),
         'optimized_messages_count': len(optimized_messages),
         'has_summary': any(m.get('is_summary') for m in optimized_messages),
         'additional_context_length': len(additional_context)
@@ -837,7 +871,9 @@ def api_change_model():
     
     Switching dinamico tra modelli Ollama (es. mistral, llama2, ecc.)
     """
-    data = request.json
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'error': 'Nessun dato ricevuto'}), 400
     new_model = data.get('model')
     
     if not new_model:
@@ -881,7 +917,9 @@ def api_pilot_memory_search():
     """Cerca nella memoria strutturata del Pilot"""
     if not PILOT_ENABLED or not pilot:
         return jsonify({'error': 'Pilot non attivo'}), 503
-    data = request.json
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'error': 'Nessun dato ricevuto'}), 400
     query = data.get('query', '').strip()
     if not query:
         return jsonify({'error': 'Query vuota'}), 400
@@ -894,7 +932,9 @@ def api_pilot_add_fact():
     """Aggiunge un fatto manuale alla memoria Pilot"""
     if not PILOT_ENABLED or not pilot:
         return jsonify({'error': 'Pilot non attivo'}), 503
-    data = request.json
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'error': 'Nessun dato ricevuto'}), 400
     key = data.get('key', '').strip()
     value = data.get('value', '').strip()
     if not key or not value:
@@ -908,7 +948,9 @@ def api_pilot_add_task():
     """Crea un task nel Pilot"""
     if not PILOT_ENABLED or not pilot:
         return jsonify({'error': 'Pilot non attivo'}), 503
-    data = request.json
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'error': 'Nessun dato ricevuto'}), 400
     title = data.get('title', '').strip()
     if not title:
         return jsonify({'error': 'Titolo richiesto'}), 400
@@ -925,7 +967,8 @@ def api_pilot_reload():
         pilot.reload_config()
         return jsonify({'success': True, 'version': pilot.cfg.version})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error("Errore reload config: %s", e, exc_info=True)
+        return jsonify({'error': 'Errore nel reload della configurazione'}), 500
 
 
 @app.errorhandler(404)
@@ -935,11 +978,10 @@ def not_found(e):
 
 @app.errorhandler(400)
 def bad_request(e):
-    """Handler per bad request - debug"""
-    logger.warning("BAD REQUEST 400: %s — %s", e, getattr(e, 'description', ''))
+    """Handler per bad request"""
+    logger.warning("BAD REQUEST 400: %s", e)
     return jsonify({
-        'error': 'Richiesta non valida',
-        'details': str(e.description) if hasattr(e, 'description') else str(e)
+        'error': 'Richiesta non valida'
     }), 400
 
 
@@ -954,7 +996,7 @@ def ratelimit_handler(e):
         'error': 'Troppe richieste. Rallenta un po\' 😊',
         'message': 'Hai superato il limite di richieste permesse. Attendi qualche secondo.',
         'retry_after': getattr(e.description, 'retry_after', 60),
-        'dev_note': 'In sviluppo puoi disabilitare il rate limiting con: RATE_LIMIT_ENABLED=False'
+        **({'dev_note': 'In sviluppo puoi disabilitare il rate limiting con: RATE_LIMIT_ENABLED=False'} if app.debug else {})
     }), 429
 
 

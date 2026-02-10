@@ -5,6 +5,7 @@ Configurazione Omni Eye AI
 import os
 import secrets
 import logging
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 _logger = logging.getLogger(__name__)
@@ -25,22 +26,48 @@ os.makedirs(CONVERSATIONS_DIR, exist_ok=True)
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 
 # Configurazione AI (da variabili d'ambiente con fallback)
+def _safe_float(val, default):
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        _logger.warning("Valore non valido '%s', uso default %s", val, default)
+        return default
+
+def _safe_int(val, default):
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        _logger.warning("Valore non valido '%s', uso default %s", val, default)
+        return default
+
 AI_CONFIG = {
     'model': os.getenv('OLLAMA_MODEL', 'llama3.2'),
-    'temperature': float(os.getenv('OLLAMA_TEMPERATURE', '0.7')),
-    'max_tokens': int(os.getenv('OLLAMA_MAX_TOKENS', '2048')),
-    'context_window': int(os.getenv('OLLAMA_CONTEXT_WINDOW', '4096')),
+    'temperature': _safe_float(os.getenv('OLLAMA_TEMPERATURE', '0.7'), 0.7),
+    'max_tokens': _safe_int(os.getenv('OLLAMA_MAX_TOKENS', '2048'), 2048),
+    'context_window': _safe_int(os.getenv('OLLAMA_CONTEXT_WINDOW', '4096'), 4096),
 }
 
 # Host Ollama (per uso remoto, es. da Termux verso PC)
-OLLAMA_HOST = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
+_raw_host = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
+_parsed = urlparse(_raw_host)
+if _parsed.scheme not in ('http', 'https'):
+    _logger.error("OLLAMA_HOST ha schema non valido '%s', uso default http://localhost:11434", _parsed.scheme)
+    OLLAMA_HOST = 'http://localhost:11434'
+else:
+    OLLAMA_HOST = _raw_host
 
 # Configurazione Server (da variabili d'ambiente con fallback)
 SERVER_CONFIG = {
     'host': os.getenv('HOST', '127.0.0.1'),
-    'port': int(os.getenv('PORT', '5000')),
+    'port': _safe_int(os.getenv('PORT', '5000'), 5000),
     'debug': os.getenv('DEBUG', 'False').lower() == 'true',
 }
+
+if SERVER_CONFIG['debug']:
+    _logger.warning(
+        "⚠️  MODALITÀ DEBUG ATTIVA — Il debugger Werkzeug fornisce RCE! "
+        "Non esporre il server su reti pubbliche."
+    )
 
 # Secret key per Flask sessions
 _env_secret = os.getenv('SECRET_KEY', '')
@@ -55,8 +82,8 @@ else:
 
 # Configurazione Upload (da variabili d'ambiente con fallback)
 UPLOAD_CONFIG = {
-    'max_file_size': int(os.getenv('MAX_FILE_SIZE_MB', '10')) * 1024 * 1024,
-    'allowed_extensions': set(os.getenv('ALLOWED_EXTENSIONS', '.txt,.pdf,.docx,.md,.py,.js,.html,.css,.json').split(',')),
+    'max_file_size': _safe_int(os.getenv('MAX_FILE_SIZE_MB', '10'), 10) * 1024 * 1024,
+    'allowed_extensions': set(ext.strip() for ext in os.getenv('ALLOWED_EXTENSIONS', '.txt,.pdf,.docx,.md,.py,.js,.html,.css,.json').split(',')),
 }
 
 # Configurazione Rate Limiting
@@ -78,7 +105,8 @@ RATE_LIMIT_CONFIG = {
 }
 
 # Configurazione CSRF Protection
-# DISABILITATO: Non serve per API REST (già protette da CORS)
+# DISABILITATO: Sicuro solo perché il server è vincolato a localhost (127.0.0.1).
+# Se esposto su rete pubblica, riabilitare CSRF.
 CSRF_ENABLED = os.getenv('CSRF_ENABLED', 'False').lower() == 'true'  # Default False
 
 # Prompt di sistema predefinito

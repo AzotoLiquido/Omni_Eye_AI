@@ -517,13 +517,20 @@ async function handleStreamResponse(response, contentDiv) {
     const decoder = new TextDecoder();
     let fullResponse = '';
     let currentEvent = null;
+    let remainder = '';  // Buffer per linee spezzate tra chunk
     
     while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         
-        const chunk = decoder.decode(value);
+        const chunk = remainder + decoder.decode(value, {stream: true});
+        remainder = '';
         const lines = chunk.split('\n');
+        
+        // L'ultima "linea" potrebbe essere incompleta — la teniamo per il prossimo chunk
+        if (!chunk.endsWith('\n')) {
+            remainder = lines.pop();
+        }
         
         for (const line of lines) {
             if (line.startsWith('event: ')) {
@@ -545,6 +552,9 @@ async function handleStreamResponse(response, contentDiv) {
             }
         }
     }
+    // Flush finale del decoder per caratteri multi-byte residui
+    const final = decoder.decode();
+    if (final) remainder += final;
 }
 
 // ============================================================================

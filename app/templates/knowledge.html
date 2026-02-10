@@ -414,15 +414,15 @@
             html += `
                 <div class="kb-stat">
                     <span class="kb-stat-label">Persone menzionate</span>
-                    <span class="kb-stat-value">${entities.people_count}</span>
+                    <span class="kb-stat-value">${Number(entities.people_count) || 0}</span>
                 </div>
                 <div class="kb-stat">
                     <span class="kb-stat-label">Preferenze salvate</span>
-                    <span class="kb-stat-value">${entities.preferences_count}</span>
+                    <span class="kb-stat-value">${Number(entities.preferences_count) || 0}</span>
                 </div>
                 <div class="kb-stat">
                     <span class="kb-stat-label">Date/Eventi</span>
-                    <span class="kb-stat-value">${entities.dates_count}</span>
+                    <span class="kb-stat-value">${Number(entities.dates_count) || 0}</span>
                 </div>
             `;
             
@@ -494,7 +494,7 @@
             
             if (Object.keys(results.user_profile).length > 0) {
                 html += '<h3>Profilo Utente:</h3>';
-                html += `<pre>${JSON.stringify(results.user_profile, null, 2)}</pre>`;
+                html += '<pre id="_profilePre"></pre>';
             }
             
             if (!results.relevant_topics?.length && Object.keys(results.user_profile).length === 0) {
@@ -503,6 +503,11 @@
             
             html += '</div>';
             container.innerHTML = html;
+            // Inserisci profilo utente in modo sicuro (textContent evita XSS)
+            const profilePre = document.getElementById('_profilePre');
+            if (profilePre) {
+                profilePre.textContent = JSON.stringify(results.user_profile, null, 2);
+            }
         }
         
         // Ricerca con Enter
