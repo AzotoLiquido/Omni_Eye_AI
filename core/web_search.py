@@ -233,9 +233,21 @@ def format_search_results_user(results: List[Dict[str, str]], query: str = "") -
     return "\n".join(lines)
 
 
-# ── Post-filtro: rimuove URL inventati dal modello ─────────────────────
+# ── Post-filtro: rimuove URL inventati e riferimenti falsi ─────────────
 _MD_LINK_RE = re.compile(r"\[([^\]]*?)\]\(https?://[^)]+\)")
 _BARE_URL_RE = re.compile(r"(?<!\()https?://[^\s)]+")  # Lookbehind: skip URLs inside markdown (
+
+# Pattern per righe che sembrano riferimenti/bibliografia falsi
+_FAKE_REF_PATTERNS = re.compile(
+    r"^\s*(?:"
+    r"(?:[-•*]\s*)?(?:Fonte|Fonti|Source|Sources|Riferiment[oi]|Reference|Link|Per saperne di più|Per maggiori informazioni|Ulteriori informazioni)\s*:?.*"
+    r"|(?:[-•*]\s*)?\S+.*-\s*Wikipedia.*"
+    r"|(?:[-•*]\s*)?@\w+.*"
+    r"|(?:[-•*]\s*)?\[?(?:Fonte|Source)\s*\d+\]?.*"
+    r"|(?:[-•*]\s*)?(?:Vedi anche|See also|Leggi anche|Read more)\s*:?.*"
+    r")\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 def strip_hallucinated_urls(text: str, allowed_urls: Set[str]) -> str:
@@ -258,9 +270,47 @@ def strip_hallucinated_urls(text: str, allowed_urls: Set[str]) -> str:
         lambda m: m.group(0) if m.group(0) in allowed_urls else "",
         text,
     )
+    # Rimuovi righe che sembrano riferimenti/bibliografia inventati
+    text = _strip_trailing_references(text)
     # Pulisci spazi doppi residui
     text = re.sub(r"  +", " ", text)
-    return text
+    # Rimuovi righe vuote multiple consecutive
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _strip_trailing_references(text: str) -> str:
+    """
+    Rimuove dall'output del modello le righe finali che sembrano
+    riferimenti/fonti/link inventati (es. 'Donald Trump - Wikipedia',
+    '@handle', 'Fonti:', etc.).
+    """
+    lines = text.rstrip().split("\n")
+    # Scorri dal basso: rimuovi righe vuote e righe che matchano i pattern
+    while lines:
+        last = lines[-1].strip()
+        if not last:
+            lines.pop()
+            continue
+        if _FAKE_REF_PATTERNS.match(last):
+            lines.pop()
+            continue
+        # Riga con solo un separatore (---, ===, ***)
+        if re.match(r"^[-=*_]{3,}\s*$", last):
+            lines.pop()
+            continue
+        # Riga che introduce una lista di link (es. "trovate nei seguenti link:")
+        if re.search(
+            r"(?:seguenti|questi|queste)\s+(?:link|fonti|riferimenti|risorse)"
+            r"|(?:following|these)\s+(?:links|sources|references)"
+            r"|(?:per\s+(?:ulteriori|maggiori|pi[uù])\s+(?:informazioni|dettagli|approfondimenti))"
+            r"|(?:(?:puoi|potete)\s+(?:consultare|visitare|trovare|leggere))",
+            last, re.IGNORECASE,
+        ):
+            lines.pop()
+            continue
+        break
+    return "\n".join(lines)
 
 
 def search_and_format(message: str, max_results: int = 5) -> Optional[dict]:
@@ -375,15 +425,24 @@ def _format_augmented_context(
         lines.append("")
 
     lines.extend([
-        "ISTRUZIONI:",
-        "- Rispondi in modo COMPLETO e DETTAGLIATO.",
-        "- Usa PRINCIPALMENTE il contenuto Wikipedia se disponibile.",
-        "- Integra con le altre fonti e la tua conoscenza per arricchire.",
+        "",
+        "═══ ISTRUZIONI OBBLIGATORIE ═══",
+        "LINGUA: Rispondi in italiano corretto e naturale.",
+        "CONTENUTO:",
+        "- PARAFRASA fedelmente i dati forniti sopra. NON inventare fatti.",
+        "- Se c'è contenuto Wikipedia, quello è la tua fonte principale.",
+        "- Copia date, nomi, numeri ESATTAMENTE come appaiono nei dati.",
+        "- NON aggiungere informazioni che non sono nei dati forniti.",
+        "- Se una informazione non è nei dati, puoi integrarla SOLO se sei sicuro.",
+        "FORMATO:",
         "- Struttura con paragrafi, elenchi puntati, sezioni Markdown.",
         "- Copri: biografia/definizione, fatti chiave, contesto storico, impatto.",
-        "- NON citare le fonti per numero (l'utente non le vede).",
+        "DIVIETI ASSOLUTI:",
+        "- NON aggiungere sezioni 'Fonti', 'Riferimenti', 'Link utili' alla fine.",
+        "- NON citare Wikipedia, fonti web o nomi di siti.",
         "- NON inventare URL. NON inserire link nella risposta.",
-        "- Se i dati non bastano, integra con la tua conoscenza dichiarandolo.",
+        "- NON scrivere handle social (@...) o nomi di account.",
+        "- NON aggiungere una lista di link/fonti alla fine della risposta.",
     ])
     return "\n".join(lines)
 
