@@ -168,13 +168,10 @@ def api_chat():
     web_context_sync = web_search_data_sync["model"] if web_search_data_sync else None
     
     # System prompt: Pilot (se attivo) oppure fallback config.py
-    if PILOT_ENABLED and pilot:
-        extra = additional_context
-        if web_context_sync:
-            extra = web_context_sync + "\n" + (extra or "")
+    if PILOT_ENABLED and pilot and not web_context_sync:
         system_prompt = pilot.build_system_prompt(
             user_message=user_message,
-            extra_instructions=extra,
+            extra_instructions=additional_context,
         )
     else:
         system_prompt = config.SYSTEM_PROMPT
@@ -304,12 +301,13 @@ def api_chat_stream():
     web_context = web_search_data["model"] if web_search_data else None
     
     # System prompt: Pilot (se attivo) oppure fallback
-    if PILOT_ENABLED and pilot:
+    # Se web_context è presente, NON usare il Pilot: il suo system prompt
+    # contiene istruzioni ReAct ("Pensiero:", "Azione:") che il modello
+    # replica anche senza il planner attivo → output spazzatura.
+    if PILOT_ENABLED and pilot and not web_context:
         extra = additional_context
         if image_memory:
             extra = image_memory + "\n" + (extra or "")
-        if web_context:
-            extra = web_context + "\n" + (extra or "")
         system_prompt = pilot.build_system_prompt(
             user_message=user_message,
             extra_instructions=extra,
