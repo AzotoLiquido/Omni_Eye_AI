@@ -126,7 +126,7 @@ class PromptBuilder:
         custom = self.cfg.custom_instructions
         lines = [
             f"# Identità",
-            f"Sei **{self.cfg.name}** v{self.cfg.version}, un assistente AI locale.",
+            f"Sei **{self.cfg.name}**, un assistente AI locale.",
         ]
         if desc:
             lines.append(f"{desc}")
@@ -136,6 +136,11 @@ class PromptBuilder:
             "\nOperi sul dispositivo dell'utente, nessun dato esce dalla macchina. "
             "Rispondi in modo accurato, utile e trasparente. "
             "Se non sei sicuro di qualcosa, dichiaralo esplicitamente."
+        )
+        lines.append(
+            "\nREGOLE IDENTITÀ: il tuo nome è solo quello indicato sopra. "
+            "NON inventare versioni, sigle, acronimi, sotto-nomi o codici di progetto. "
+            "NON attribuirti funzionalità inesistenti."
         )
         return "\n".join(lines)
 

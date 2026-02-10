@@ -166,10 +166,33 @@ def api_chat():
     # ── Ricerca web automatica (se il messaggio lo richiede) ──
     web_search_data_sync = search_and_format(user_message)
     
-    # Modalità "links": risultati diretti, skip modello
+    # Modalità "links": risultati diretti + breve commento AI
     if web_search_data_sync and web_search_data_sync["mode"] == "links":
-        closing = "\n\n---\nRicerca effettuata, fammi sapere se ti serve altro."
-        response = web_search_data_sync["user"] + closing
+        user_results = web_search_data_sync["user"]
+        # Chiedi al modello un breve commento sui risultati
+        from core.web_search import format_search_results
+        ai_context = format_search_results(
+            [{"title": "", "url": "", "snippet": ""}],  # dummy, il prompt è fisso
+            query=user_message,
+        )
+        try:
+            comment = ai_engine.generate_response(
+                user_message,
+                conversation_history=history[-4:] if history else None,
+                system_prompt=(
+                    f"L'utente ha chiesto: \"{user_message}\"\n"
+                    f"I seguenti risultati reali sono già stati mostrati:\n{user_results}\n\n"
+                    "Scrivi un BREVE commento (2-3 frasi) che aiuti l'utente: "
+                    "indica quale risultato è più rilevante e perché. "
+                    "NON ripetere i link. NON inventare URL. NON dire che non puoi cercare."
+                ),
+            )
+            # Filtra URL inventati dal commento
+            from core.web_search import strip_hallucinated_urls
+            comment = strip_hallucinated_urls(comment, web_search_data_sync["urls"])
+            response = user_results + "\n\n---\n" + comment.strip()
+        except Exception:
+            response = user_results + "\n\n---\nRicerca effettuata, fammi sapere se ti serve altro."
         memory.add_message_advanced(conv_id, 'assistant', response, extract_entities=False)
         return jsonify({
             'response': response,
@@ -345,12 +368,33 @@ def api_chat_stream():
         response_saved = False
         
         try:
-            # ── Web search: modalità "links" → risultati diretti, skip modello ──
+            # ── Web search: modalità "links" → risultati diretti + commento AI ──
             if web_mode == "links":
                 user_results = web_search_data["user"]
-                closing = "\n\n---\nRicerca effettuata, fammi sapere se ti serve altro."
-                full_response = user_results + closing
-                yield _sse_data(user_results + closing)
+                yield _sse_data(user_results + "\n\n---\n")
+                # Genera breve commento AI in streaming
+                try:
+                    comment_prompt = (
+                        f"L'utente ha chiesto: \"{user_message}\"\n"
+                        f"I seguenti risultati reali sono già stati mostrati:\n{user_results}\n\n"
+                        "Scrivi un BREVE commento (2-3 frasi) che aiuti l'utente: "
+                        "indica quale risultato è più rilevante e perché. "
+                        "NON ripetere i link. NON inventare URL. NON dire che non puoi cercare."
+                    )
+                    comment_buf = ""
+                    for chunk in ai_engine.generate_response_stream(
+                        user_message,
+                        conversation_history=clean_history[-4:] if clean_history else None,
+                        system_prompt=comment_prompt,
+                    ):
+                        comment_buf += chunk
+                        yield _sse_data(chunk)
+                    from core.web_search import strip_hallucinated_urls
+                    # Il commento è già stato streamato; salviamo la versione filtrata
+                    comment_clean = strip_hallucinated_urls(comment_buf, web_search_data["urls"])
+                    full_response = user_results + "\n\n---\n" + comment_clean
+                except Exception:
+                    full_response = user_results + "\n\n---\nRicerca effettuata, fammi sapere se ti serve altro."
 
                 memory.add_message_advanced(conv_id, 'assistant', full_response, extract_entities=False)
                 response_saved = True

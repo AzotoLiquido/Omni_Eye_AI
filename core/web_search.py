@@ -131,6 +131,24 @@ def _clean_query(message: str) -> str:
     return cleaned
 
 
+# ── Filtro snippet spazzatura (pagine generiche YouTube, placeholder) ──
+_GARBAGE_PATTERNS = re.compile(
+    r"О сервисе|Авторские права|Связаться с нами|Рекламодателям"
+    r"|Enjoy the videos and music you love, upload original content"
+    r"|Share your videos with friends, family, and the world"
+    r"|Sign in to like videos, comment, and subscribe"
+    r"|О сервисе Прессе",
+    re.IGNORECASE,
+)
+
+
+def _is_garbage_snippet(snippet: str) -> bool:
+    """Rileva snippet generici/placeholder (es. pagine YouTube boilerplate)."""
+    if not snippet or len(snippet.strip()) < 15:
+        return True
+    return bool(_GARBAGE_PATTERNS.search(snippet))
+
+
 def web_search(
     query: str,
     *,
@@ -170,10 +188,14 @@ def web_search(
         results = []
         with DDGS() as ddgs:
             for r in ddgs.text(search_query, region=region, max_results=max_results):
+                snippet = html.unescape(r.get("body", ""))
+                # Filtra risultati con snippet spazzatura (pagine generiche YouTube, ecc.)
+                if _is_garbage_snippet(snippet):
+                    continue
                 results.append({
                     "title": html.unescape(r.get("title", "")),
                     "url": r.get("href", ""),
-                    "snippet": html.unescape(r.get("body", "")),
+                    "snippet": snippet,
                 })
         logger.info("Web search: %d risultati per '%s'", len(results), search_query[:60])
         return results
