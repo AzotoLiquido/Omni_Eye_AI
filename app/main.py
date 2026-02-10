@@ -165,10 +165,21 @@ def api_chat():
     
     # ── Ricerca web automatica (se il messaggio lo richiede) ──
     web_search_data_sync = search_and_format(user_message)
-    web_context_sync = web_search_data_sync["model"] if web_search_data_sync else None
+    
+    # Se ricerca web: mostra risultati + messaggio fisso, skip modello
+    if web_search_data_sync:
+        closing = "\n\n---\nRicerca effettuata, fammi sapere se ti serve altro."
+        response = web_search_data_sync["user"] + closing
+        memory.add_message_advanced(conv_id, 'assistant', response, extract_entities=False)
+        return jsonify({
+            'response': response,
+            'conversation_id': conv_id,
+            'success': True,
+            'pilot_meta': None
+        })
     
     # System prompt: Pilot (se attivo) oppure fallback config.py
-    if PILOT_ENABLED and pilot and not web_context_sync:
+    if PILOT_ENABLED and pilot:
         system_prompt = pilot.build_system_prompt(
             user_message=user_message,
             extra_instructions=additional_context,
@@ -177,12 +188,10 @@ def api_chat():
         system_prompt = config.SYSTEM_PROMPT
         if additional_context:
             system_prompt = additional_context + "\n" + system_prompt
-        if web_context_sync:
-            system_prompt = web_context_sync + "\n" + system_prompt
     
     # Genera risposta
     try:
-        if PILOT_ENABLED and pilot and not web_context_sync:
+        if PILOT_ENABLED and pilot:
             response, meta = pilot.process(
                 user_message,
                 conversation_history=history,
@@ -196,12 +205,6 @@ def api_chat():
                 system_prompt=system_prompt
             )
             meta = {}
-        
-        # Filtra URL inventati dal modello e prependi risultati ricerca
-        if web_search_data_sync:
-            from core.web_search import strip_hallucinated_urls
-            response = strip_hallucinated_urls(response, web_search_data_sync["urls"])
-            response = web_search_data_sync["user"] + "\n\n" + response
         
         # Salva risposta (senza estrazione entità per l'assistant)
         memory.add_message_advanced(conv_id, 'assistant', response, extract_entities=False)
@@ -300,13 +303,9 @@ def api_chat_stream():
     
     # ── Ricerca web automatica (se il messaggio lo richiede) ──
     web_search_data = search_and_format(user_message) if not images else None
-    web_context = web_search_data["model"] if web_search_data else None
     
     # System prompt: Pilot (se attivo) oppure fallback
-    # Se web_context è presente, NON usare il Pilot: il suo system prompt
-    # contiene istruzioni ReAct ("Pensiero:", "Azione:") che il modello
-    # replica anche senza il planner attivo → output spazzatura.
-    if PILOT_ENABLED and pilot and not web_context:
+    if PILOT_ENABLED and pilot and not web_search_data:
         extra = additional_context
         if image_memory:
             extra = image_memory + "\n" + (extra or "")
@@ -320,8 +319,6 @@ def api_chat_stream():
             system_prompt = image_memory + "\n" + system_prompt
         if additional_context:
             system_prompt = additional_context + "\n" + system_prompt
-        if web_context:
-            system_prompt = web_context + "\n" + system_prompt
     
     def generate():
         """Generator per lo streaming"""
@@ -334,8 +331,15 @@ def api_chat_stream():
             # così non passano dal modello che li corromperebbe.
             if web_search_data:
                 user_results = web_search_data["user"]
-                full_response += user_results + "\n\n"
-                yield _sse_data(user_results + "\n\n")
+                closing = "\n\n---\nRicerca effettuata, fammi sapere se ti serve altro."
+                full_response = user_results + closing
+                yield _sse_data(user_results + closing)
+
+                # Salva e chiudi — non serve il modello
+                memory.add_message_advanced(conv_id, 'assistant', full_response, extract_entities=False)
+                response_saved = True
+                yield f"event: end\ndata: {conv_id}\n\n"
+                return
 
             # Auto-switch a modello vision se ci sono immagini
             # P0-1: NON mutiamo più ai_engine.model/.temperature
@@ -451,10 +455,7 @@ def api_chat_stream():
                         full_response += chunk
                         yield _sse_data(chunk)
 
-            elif PILOT_ENABLED and pilot and not web_context:
-                # Streaming via Pilot (con eventuale pianificazione ReAct)
-                # Se web_context è presente, bypassa il Pilot: i risultati di
-                # ricerca sono già nel system prompt, il planner li ignorerebbe.
+            elif PILOT_ENABLED and pilot:
                 for chunk in pilot.process_stream(
                     user_message,
                     conversation_history=clean_history,
@@ -465,30 +466,14 @@ def api_chat_stream():
                     full_response += chunk
                     yield _sse_data(chunk)
             else:
-                # Se web_context: bufferizza la risposta del modello per
-                # filtrare eventuali URL inventati prima di inviarla.
-                if web_context:
-                    model_buf = ""
-                    for chunk in ai_engine.generate_response_stream(
-                        user_message,
-                        conversation_history=clean_history,
-                        system_prompt=system_prompt,
-                        images=images,
-                    ):
-                        model_buf += chunk
-                    from core.web_search import strip_hallucinated_urls
-                    model_buf = strip_hallucinated_urls(model_buf, web_search_data["urls"])
-                    full_response += model_buf
-                    yield _sse_data(model_buf)
-                else:
-                    for chunk in ai_engine.generate_response_stream(
-                        user_message, 
-                        conversation_history=clean_history,
-                        system_prompt=system_prompt,
-                        images=images,
-                    ):
-                        full_response += chunk
-                        yield _sse_data(chunk)
+                for chunk in ai_engine.generate_response_stream(
+                    user_message, 
+                    conversation_history=clean_history,
+                    system_prompt=system_prompt,
+                    images=images,
+                ):
+                    full_response += chunk
+                    yield _sse_data(chunk)
             
             # Salva la risposta completa
             memory.add_message_advanced(conv_id, 'assistant', full_response, extract_entities=False)
