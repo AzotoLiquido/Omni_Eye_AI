@@ -39,6 +39,7 @@ class ConversationMemory:
     _conv_list_cache_time = 0
     _CACHE_TTL = 2.0  # seconds
     _cache_lock = threading.Lock()  # Thread-safe cache access
+    _MAX_MESSAGES = 500  # P2-3: cap messaggi per conversazione (class-level)
     
     def __init__(self):
         """Inizializza il sistema di memoria"""
@@ -88,11 +89,10 @@ class ConversationMemory:
         now_ts = datetime.now().isoformat()
         
         # P3-12: Limit messages per conversation to prevent unbounded growth
-        _MAX_MESSAGES = 500
-        if len(conversation.get('messages', [])) >= _MAX_MESSAGES:
+        if len(conversation.get('messages', [])) >= self._MAX_MESSAGES:
             # Keep the first message (for title) + last (_MAX_MESSAGES - 1)
             msgs = conversation['messages']
-            conversation['messages'] = [msgs[0]] + msgs[-(_MAX_MESSAGES - 2):]
+            conversation['messages'] = [msgs[0]] + msgs[-(self._MAX_MESSAGES - 2):]
         
         message = {
             'role': role,

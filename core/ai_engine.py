@@ -3,14 +3,26 @@ Motore AI - Gestisce l'interazione con Ollama
 """
 
 import logging
+import threading
 import ollama
 from typing import List, Dict, Generator
 import config
 
 logger = logging.getLogger(__name__)
 
-# Client Ollama con host configurabile (supporto remoto)
-_ollama_client = ollama.Client(host=config.OLLAMA_HOST)
+# Client Ollama — lazy init (non crea connessione all'import time)
+_ollama_lock = threading.Lock()
+_ollama_client: ollama.Client | None = None
+
+
+def _get_ollama_client() -> ollama.Client:
+    """Restituisce il client Ollama, creandolo alla prima chiamata."""
+    global _ollama_client
+    if _ollama_client is None:
+        with _ollama_lock:
+            if _ollama_client is None:
+                _ollama_client = ollama.Client(host=config.OLLAMA_HOST)
+    return _ollama_client
 
 
 # ── Rilevamento ripetizioni nello streaming ──────────────────────────
@@ -51,7 +63,8 @@ class AIEngine:
         Args:
             model: Nome del modello da usare (default da config)
         """
-        self.client = _ollama_client
+        self.client = _get_ollama_client()
+        self._model_lock = threading.Lock()
         self.model = model or config.AI_CONFIG['model']
         self.temperature = config.AI_CONFIG['temperature']
         self.max_tokens = config.AI_CONFIG['max_tokens']
@@ -105,6 +118,27 @@ class AIEngine:
             opts['num_predict'] = min(opts['num_predict'], self.VISION_MAX_TOKENS)
         return opts
 
+    @staticmethod
+    def _build_messages(
+        prompt: str,
+        conversation_history: List[Dict] = None,
+        system_prompt: str = None,
+        images: List[str] = None,
+    ) -> List[Dict]:
+        """Costruisce la lista messaggi per Ollama (DRY, usato da sync e stream)."""
+        messages: List[Dict] = []
+        messages.append({
+            'role': 'system',
+            'content': system_prompt or config.SYSTEM_PROMPT,
+        })
+        if conversation_history:
+            messages.extend(conversation_history)
+        user_msg: Dict = {'role': 'user', 'content': prompt}
+        if images:
+            user_msg['images'] = images
+        messages.append(user_msg)
+        return messages
+
     def generate_response(
         self, 
         prompt: str, 
@@ -131,33 +165,10 @@ class AIEngine:
         """
         try:
             use_model = model or self.model
+            messages = self._build_messages(
+                prompt, conversation_history, system_prompt, images,
+            )
 
-            # Prepara i messaggi
-            messages = []
-            
-            # Aggiungi system prompt
-            if system_prompt:
-                messages.append({
-                    'role': 'system',
-                    'content': system_prompt
-                })
-            else:
-                messages.append({
-                    'role': 'system',
-                    'content': config.SYSTEM_PROMPT
-                })
-            
-            # Aggiungi storico conversazione
-            if conversation_history:
-                messages.extend(conversation_history)
-            
-            # Aggiungi il prompt corrente (con immagini se presenti)
-            user_msg = {'role': 'user', 'content': prompt}
-            if images:
-                user_msg['images'] = images
-            messages.append(user_msg)
-
-            # Genera risposta
             response = self.client.chat(
                 model=use_model,
                 messages=messages,
@@ -196,25 +207,10 @@ class AIEngine:
         """
         try:
             use_model = model or self.model
+            messages = self._build_messages(
+                prompt, conversation_history, system_prompt, images,
+            )
 
-            # Prepara i messaggi
-            messages = []
-            
-            if system_prompt:
-                messages.append({'role': 'system', 'content': system_prompt})
-            else:
-                messages.append({'role': 'system', 'content': config.SYSTEM_PROMPT})
-            
-            if conversation_history:
-                messages.extend(conversation_history)
-            
-            # Aggiungi messaggio utente (con immagini se presenti)
-            user_msg = {'role': 'user', 'content': prompt}
-            if images:
-                user_msg['images'] = images
-            messages.append(user_msg)
-
-            # Genera risposta in streaming
             stream = self.client.chat(
                 model=use_model,
                 messages=messages,
@@ -264,12 +260,18 @@ class AIEngine:
             Analisi o risposta
         """
         max_c = self.ANALYZE_DOC_MAX_CHARS
+        truncated = len(document_text) > max_c
+        doc_slice = document_text[:max_c]
+        trunc_note = (
+            f"\n[Nota: documento troncato a {max_c} caratteri su {len(document_text)} totali]"
+            if truncated else ""
+        )
 
         if question:
             prompt = f"""Ho questo documento:
 
 ---
-{document_text[:max_c]}  
+{doc_slice}{trunc_note}
 ---
 
 Domanda: {question}
@@ -279,7 +281,7 @@ Rispondi basandoti sul contenuto del documento."""
             prompt = f"""Analizza questo documento e fornisci un riassunto dettagliato:
 
 ---
-{document_text[:max_c]}
+{doc_slice}{trunc_note}
 ---
 
 Fornisci:
@@ -299,11 +301,10 @@ Fornisci:
         Returns:
             True se il cambio è avvenuto con successo
         """
-        old_model = self.model
-        self.model = new_model
-        
-        if self.check_model_available():
-            return True
-        else:
+        with self._model_lock:
+            old_model = self.model
+            self.model = new_model
+            if self.check_model_available():
+                return True
             self.model = old_model
             return False

@@ -13,10 +13,17 @@ logger = logging.getLogger(__name__)
 
 # Import condizionali per gestire dipendenze opzionali
 try:
-    import PyPDF2
+    import pypdf
     PDF_AVAILABLE = True
 except ImportError:
-    PDF_AVAILABLE = False
+    try:
+        import PyPDF2  # fallback legacy
+        pypdf = None
+        PDF_AVAILABLE = True
+    except ImportError:
+        PDF_AVAILABLE = False
+        pypdf = None
+        PyPDF2 = None  # type: ignore[assignment]
 
 try:
     from docx import Document
@@ -94,12 +101,15 @@ class DocumentProcessor:
     def _process_pdf(self, filepath: str) -> Tuple[Optional[str], Optional[str]]:
         """Processa file PDF"""
         if not PDF_AVAILABLE:
-            return None, "PyPDF2 non installato. Installa con: pip install PyPDF2"
+            return None, "pypdf non installato. Installa con: pip install pypdf"
         
         try:
             text = []
             with open(filepath, 'rb') as f:
-                pdf_reader = PyPDF2.PdfReader(f)
+                if pypdf is not None:
+                    pdf_reader = pypdf.PdfReader(f)
+                else:
+                    pdf_reader = PyPDF2.PdfReader(f)  # type: ignore[union-attr]
                 for page in pdf_reader.pages:
                     text.append(page.extract_text())
             
@@ -152,6 +162,10 @@ class DocumentProcessor:
         """
         if not self.is_allowed_file(filename):
             return None, "Tipo di file non permesso"
+        
+        # P2-7: Controlla file_data non vuoto
+        if not file_data:
+            return None, "File vuoto — nessun dato ricevuto"
         
         # P2-6: Controlla dimensione prima di scrivere su disco
         if len(file_data) > self.max_file_size:

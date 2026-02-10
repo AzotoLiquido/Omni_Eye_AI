@@ -234,7 +234,7 @@ def format_search_results_user(results: List[Dict[str, str]], query: str = "") -
 
 
 # ── Post-filtro: rimuove URL inventati e riferimenti falsi ─────────────
-_MD_LINK_RE = re.compile(r"\[([^\]]*?)\]\(https?://[^)]+\)")
+_MD_LINK_RE = re.compile(r"\[([^\]]*?)\]\((https?://[^)]+)\)")
 _BARE_URL_RE = re.compile(r"(?<!\()https?://[^\s)]+")  # Lookbehind: skip URLs inside markdown (
 
 # Pattern per righe che sembrano riferimenti/bibliografia falsi
@@ -258,12 +258,10 @@ def strip_hallucinated_urls(text: str, allowed_urls: Set[str]) -> str:
     - URL bare (https://...) → rimosso
     """
     def _replace_md_link(m: re.Match) -> str:
-        # Estrai l'URL dal link markdown
-        full = m.group(0)
-        url_match = re.search(r"\((https?://[^)]+)\)", full)
-        if url_match and url_match.group(1) in allowed_urls:
-            return full  # URL reale, mantieni
-        return m.group(1)  # Solo il titolo, senza link
+        title, url = m.group(1), m.group(2)
+        if url in allowed_urls:
+            return m.group(0)  # URL reale, mantieni
+        return title  # Solo il titolo, senza link
 
     text = _MD_LINK_RE.sub(_replace_md_link, text)
     text = _BARE_URL_RE.sub(
@@ -340,9 +338,9 @@ def search_and_format(message: str, max_results: int = 5) -> Optional[dict]:
     wiki_extract = None
     if factual and not youtube:
         wiki_extract = _fetch_wikipedia_extract(clean_q)
-        results = web_search(
-            f"wikipedia {clean_q}", max_results=max_results, region="it-it",
-        )
+        # P2-8: DDG senza prefisso "wikipedia" — query pulita; se wiki API
+        # ha già dato contenuto, DDG aggiunge solo fonti supplementari.
+        results = web_search(clean_q, max_results=max_results, region="it-it")
         if not results:
             results = web_search(clean_q, max_results=max_results)
     else:

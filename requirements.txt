@@ -5,6 +5,7 @@ flask-wtf>=1.2.1
 ollama>=0.2.1
 python-dotenv>=1.0.0
 PyPDF2>=3.0.1
+pypdf>=4.0.0
 python-docx>=1.1.0
 jsonschema>=4.0
 colorama>=0.4

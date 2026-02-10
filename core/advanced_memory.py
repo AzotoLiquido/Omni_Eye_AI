@@ -33,7 +33,7 @@ class ContextManager:
         """
         # Average: ~1.3 tokens per word for English/Italian
         words = len(text.split())
-        return max(words, len(text) // 4)
+        return max(int(words * 1.3), len(text) // 4)
     
     def calculate_messages_tokens(self, messages: List[Dict]) -> int:
         """Calcola il totale dei token nei messaggi"""
@@ -95,11 +95,19 @@ class ContextManager:
     def _generate_summary(self, messages: List[Dict], ai_engine) -> str:
         """Genera un riassunto dei messaggi usando l'AI"""
         
-        # Prepara il testo da riassumere
-        conversation_text = "\n\n".join([
-            f"{msg['role'].upper()}: {msg['content']}"
-            for msg in messages
-        ])
+        # Prepara il testo da riassumere (cap a 6000 chars per non superare
+        # la context window del modello)
+        _MAX_SUMMARY_INPUT = 6000
+        parts = []
+        total_len = 0
+        for msg in messages:
+            line = f"{msg['role'].upper()}: {msg['content']}"
+            if total_len + len(line) > _MAX_SUMMARY_INPUT:
+                parts.append(f"[... {len(messages) - len(parts)} messaggi precedenti omessi ...]")
+                break
+            parts.append(line)
+            total_len += len(line)
+        conversation_text = "\n\n".join(parts)
         
         summary_prompt = f"""Riassumi questa conversazione in modo conciso ma completo, 
 mantenendo tutti i fatti importanti, nomi, date e informazioni chiave.
@@ -125,7 +133,17 @@ RIASSUNTO:"""
 
 class EntityTracker:
     """Traccia entitÃ  menzionate nelle conversazioni (persone, luoghi, fatti)"""
-    
+
+    # P1-4: Parole comuni da escludere (frozenset class-level)
+    _STOP_NAMES: frozenset = frozenset({
+        'sono', 'come', 'cosa', 'tutto', 'questo', 'quella', 'quello',
+        'ancora', 'sempre', 'grazie', 'ciao', 'buongiorno', 'buonasera',
+        'molto', 'poco', 'bene', 'male', 'dopo', 'prima', 'oggi',
+        'domani', 'ieri', 'perché', 'quando', 'dove', 'quindi',
+    })
+
+    _MAX_RELEVANT_ENTITIES = 10  # P2-4: cap globale su risultati di get_relevant_entities
+
     def __init__(self, storage_path: str):
         """
         Args:
@@ -198,21 +216,14 @@ class EntityTracker:
             r'(?:mi chiamo|si chiama|chiamato|chiamata|conosco)\s+([A-Z][a-zÃ -Ãº]+)',
             r'(?:parlo con|parlato con|visto|incontrato)\s+([A-Z][a-zÃ -Ãº]+)',
         ]
-        
-        # Parole comuni da escludere (false positive frequenti)
-        STOP_NAMES = {
-            'sono', 'come', 'cosa', 'tutto', 'questo', 'quella', 'quello',
-            'ancora', 'sempre', 'grazie', 'ciao', 'buongiorno', 'buonasera',
-            'molto', 'poco', 'bene', 'male', 'dopo', 'prima', 'oggi',
-            'domani', 'ieri', 'perchÃ©', 'quando', 'dove', 'quindi',
-        }
+
         
         # P3-14: Removed re.IGNORECASE since patterns explicitly require uppercase first letter
         for pattern in name_patterns:
             matches = re.findall(pattern, text)
             for name in matches:
                 name = name.strip('.,!?;:')
-                if len(name) <= 2 or name.lower() in STOP_NAMES:
+                if len(name) <= 2 or name.lower() in self._STOP_NAMES:
                     continue
                 if not name[0].isupper():
                     continue
@@ -294,13 +305,15 @@ class EntityTracker:
         # Cerca persone menzionate
         for name, contexts in self.entities['people'].items():
             if name.lower() in text_lower:
-                relevant.append(f"â€¢ {name}: menzionato precedentemente")
+                relevant.append(f"• {name}: menzionato precedentemente")
+            if len(relevant) >= self._MAX_RELEVANT_ENTITIES:
+                break
         
         # Cerca preferenze rilevanti per la query (non tutte)
         for key, pref in self.entities['preferences'].items():
             if pref['value'].lower() in text_lower or pref['sentiment'].lower() in text_lower:
                 relevant.append(f"• Preferenza: {pref['sentiment']} {pref['value']}")
-                if len(relevant) >= 8:
+                if len(relevant) >= self._MAX_RELEVANT_ENTITIES:
                     break
         
         if relevant:
@@ -411,12 +424,19 @@ class KnowledgeBase:
         """Estrae interessi dell'utente"""
         text_lower = text.lower()
         
-        # Pattern per interessi
-        if 'mi interessa' in text_lower:
-            after = text_lower.split('mi interessa')[1].split('.')[0]
-            interest = after.strip()
-            if interest and interest not in self.knowledge['user_profile']['interests']:
-                self.knowledge['user_profile']['interests'].append(interest)
+        # P2-5: Pattern estesi per interessi (includono "mi piace", "passione")
+        _INTEREST_TRIGGERS = [
+            ('mi interessa', 'mi interessa'),
+            ('mi piace', 'mi piace'),
+            ('la mia passione', 'la mia passione'),
+            ('sono appassionato di', 'sono appassionato di'),
+        ]
+        for trigger, split_on in _INTEREST_TRIGGERS:
+            if trigger in text_lower:
+                after = text_lower.split(split_on, 1)[1].split('.')[0]
+                interest = after.strip()
+                if interest and interest not in self.knowledge['user_profile']['interests']:
+                    self.knowledge['user_profile']['interests'].append(interest)
     
     def _count_topics(self, text: str) -> None:
         """Conta i topic discussi"""
