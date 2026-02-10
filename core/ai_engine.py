@@ -4,6 +4,7 @@ Motore AI - Gestisce l'interazione con Ollama
 
 import logging
 import ollama
+from collections import deque
 from typing import List, Dict, Generator
 import config
 
@@ -13,9 +14,37 @@ logger = logging.getLogger(__name__)
 _ollama_client = ollama.Client(host=config.OLLAMA_HOST)
 
 
+# ── Rilevamento ripetizioni nello streaming ──────────────────────────
+
+def _detect_repetition(buffer: str, *, min_phrase: int = 40, max_repeats: int = 2) -> bool:
+    """Rileva se il testo in *buffer* contiene un pattern che si ripete.
+
+    Scorre le ultime `min_phrase`..`len(buffer)//2` lunghezze di sotto-stringa
+    dalla coda del buffer e verifica se la stessa frase compare più di
+    *max_repeats* volte.  Ritorna True appena trova una ripetizione.
+    """
+    blen = len(buffer)
+    if blen < min_phrase * (max_repeats + 1):
+        return False
+    # Controlla frasi di lunghezza crescente
+    for phrase_len in (min_phrase, min_phrase * 2, min(blen // 3, 300)):
+        if phrase_len > blen // 2:
+            break
+        tail = buffer[-phrase_len:]
+        count = buffer.count(tail)
+        if count > max_repeats:
+            return True
+    return False
+
+
 class AIEngine:
     """Gestisce la comunicazione con i modelli AI locali tramite Ollama"""
-    
+
+    # Penalità ripetizione Ollama – valori > 1.0 scoraggiano i token già generati
+    REPEAT_PENALTY = 1.3
+    REPEAT_LAST_N = 128          # finestra di contesto per la penalità
+    VISION_MAX_TOKENS = 1024     # cap dedicato per evitare loop nei modelli vision
+
     def __init__(self, model: str = None):
         """
         Inizializza il motore AI
@@ -102,14 +131,22 @@ class AIEngine:
                 user_msg['images'] = images
             messages.append(user_msg)
             
+            # Opzioni di generazione
+            opts = {
+                'temperature': self.temperature,
+                'num_predict': self.max_tokens,
+                'repeat_penalty': self.REPEAT_PENALTY,
+                'repeat_last_n': self.REPEAT_LAST_N,
+            }
+            # Cap più basso per modelli vision (tendono a degenerare)
+            if images:
+                opts['num_predict'] = min(opts['num_predict'], self.VISION_MAX_TOKENS)
+
             # Genera risposta
             response = self.client.chat(
                 model=self.model,
                 messages=messages,
-                options={
-                    'temperature': self.temperature,
-                    'num_predict': self.max_tokens,
-                }
+                options=opts,
             )
             
             return response['message']['content']
@@ -155,20 +192,42 @@ class AIEngine:
                 user_msg['images'] = images
             messages.append(user_msg)
             
+            # Opzioni di generazione
+            opts = {
+                'temperature': self.temperature,
+                'num_predict': self.max_tokens,
+                'repeat_penalty': self.REPEAT_PENALTY,
+                'repeat_last_n': self.REPEAT_LAST_N,
+            }
+            if images:
+                opts['num_predict'] = min(opts['num_predict'], self.VISION_MAX_TOKENS)
+
             # Genera risposta in streaming
             stream = self.client.chat(
                 model=self.model,
                 messages=messages,
                 stream=True,
-                options={
-                    'temperature': self.temperature,
-                    'num_predict': self.max_tokens,
-                }
+                options=opts,
             )
-            
+
+            # Buffer circolare per rilevamento ripetizioni in tempo reale
+            running_text = ""
             for chunk in stream:
                 if 'message' in chunk and 'content' in chunk['message']:
-                    yield chunk['message']['content']
+                    token = chunk['message']['content']
+                    running_text += token
+
+                    # Guard anti-loop: se il modello sta ripetendo, taglia
+                    if len(running_text) > 200 and _detect_repetition(running_text):
+                        logger.warning(
+                            "Ripetizione rilevata dopo %d chars, generazione interrotta",
+                            len(running_text),
+                        )
+                        # Emetti un avviso visivo opzionale
+                        yield "\n\n⚠️ *Risposta troncata: il modello ha iniziato a ripetere.*"
+                        return
+
+                    yield token
                     
         except Exception as e:
             logger.error("Errore streaming risposta: %s", e)
