@@ -166,8 +166,8 @@ def api_chat():
     # ── Ricerca web automatica (se il messaggio lo richiede) ──
     web_search_data_sync = search_and_format(user_message)
     
-    # Se ricerca web: mostra risultati + messaggio fisso, skip modello
-    if web_search_data_sync:
+    # Modalità "links": risultati diretti, skip modello
+    if web_search_data_sync and web_search_data_sync["mode"] == "links":
         closing = "\n\n---\nRicerca effettuata, fammi sapere se ti serve altro."
         response = web_search_data_sync["user"] + closing
         memory.add_message_advanced(conv_id, 'assistant', response, extract_entities=False)
@@ -188,6 +188,10 @@ def api_chat():
         system_prompt = config.SYSTEM_PROMPT
         if additional_context:
             system_prompt = additional_context + "\n" + system_prompt
+
+    # Modalità "augmented": inietta contesto web nel system prompt
+    if web_search_data_sync and web_search_data_sync["mode"] == "augmented":
+        system_prompt = web_search_data_sync["context"] + "\n\n" + system_prompt
     
     # Genera risposta
     try:
@@ -205,6 +209,11 @@ def api_chat():
                 system_prompt=system_prompt
             )
             meta = {}
+        
+        # Filtra URL inventati se la risposta è arricchita da ricerca web
+        if web_search_data_sync and web_search_data_sync["mode"] == "augmented":
+            from core.web_search import strip_hallucinated_urls
+            response = strip_hallucinated_urls(response, web_search_data_sync["urls"])
         
         # Salva risposta (senza estrazione entità per l'assistant)
         memory.add_message_advanced(conv_id, 'assistant', response, extract_entities=False)
@@ -303,8 +312,10 @@ def api_chat_stream():
     
     # ── Ricerca web automatica (se il messaggio lo richiede) ──
     web_search_data = search_and_format(user_message) if not images else None
+    web_mode = web_search_data["mode"] if web_search_data else None
     
     # System prompt: Pilot (se attivo) oppure fallback
+    # Bypassa Pilot se c'è ricerca web (sia links che augmented)
     if PILOT_ENABLED and pilot and not web_search_data:
         extra = additional_context
         if image_memory:
@@ -319,6 +330,10 @@ def api_chat_stream():
             system_prompt = image_memory + "\n" + system_prompt
         if additional_context:
             system_prompt = additional_context + "\n" + system_prompt
+
+    # Modalità "augmented": inietta contesto web nel system prompt
+    if web_mode == "augmented":
+        system_prompt = web_search_data["context"] + "\n\n" + system_prompt
     
     def generate():
         """Generator per lo streaming"""
@@ -326,25 +341,36 @@ def api_chat_stream():
         response_saved = False
         
         try:
-            # ── Risultati ricerca web: stream diretto all'utente ──
-            # I link reali vengono inviati PRIMA della risposta AI,
-            # così non passano dal modello che li corromperebbe.
-            if web_search_data:
+            # ── Web search: modalità "links" → risultati diretti, skip modello ──
+            if web_mode == "links":
                 user_results = web_search_data["user"]
                 closing = "\n\n---\nRicerca effettuata, fammi sapere se ti serve altro."
                 full_response = user_results + closing
                 yield _sse_data(user_results + closing)
 
-                # Salva e chiudi — non serve il modello
                 memory.add_message_advanced(conv_id, 'assistant', full_response, extract_entities=False)
                 response_saved = True
                 yield f"event: end\ndata: {conv_id}\n\n"
                 return
 
+            # ── Web search: modalità "augmented" → modello con contesto web ──
+            # Buffer + filtro URL per togliere eventuali link inventati
+            if web_mode == "augmented":
+                model_buf = ""
+                for chunk in ai_engine.generate_response_stream(
+                    user_message,
+                    conversation_history=clean_history,
+                    system_prompt=system_prompt,
+                    images=images,
+                ):
+                    model_buf += chunk
+                from core.web_search import strip_hallucinated_urls
+                model_buf = strip_hallucinated_urls(model_buf, web_search_data["urls"])
+                full_response += model_buf
+                yield _sse_data(model_buf)
+
             # Auto-switch a modello vision se ci sono immagini
-            # P0-1: NON mutiamo più ai_engine.model/.temperature
-            #       usiamo variabili locali + parametri model=/temperature= nei metodi
-            if images:
+            elif images:
                 all_models = ai_engine.list_available_models()
                 vision_models = [m for m in all_models
                                  if any(v in m.lower() for v in VISION_PRIORITY)]
