@@ -48,12 +48,12 @@ class PilotConfig:
         if not self._config_path.exists():
             raise FileNotFoundError(f"Config non trovata: {self._config_path}")
 
-        with open(self._config_path, "r", encoding="utf-8") as f:
+        with open(self._config_path, "r", encoding="utf-8-sig") as f:
             self._raw = json.load(f)
 
         if self._schema_path.exists():
             if self._schema_path.stat().st_size > 0:
-                with open(self._schema_path, "r", encoding="utf-8") as f:
+                with open(self._schema_path, "r", encoding="utf-8-sig") as f:
                     self._schema = json.load(f)
             else:
                 import logging as _log
