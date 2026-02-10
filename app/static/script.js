@@ -530,46 +530,87 @@ async function handleStreamResponse(response, contentDiv) {
     const decoder = new TextDecoder();
     let fullResponse = '';
     let currentEvent = null;
-    let remainder = '';  // Buffer per linee spezzate tra chunk
-    
+    let dataBuffer = [];       // Accumula linee data: per evento SSE (spec-compliant)
+    let remainder = '';         // Buffer per linee spezzate tra chunk
+    let endReceived = false;    // Flag: evento 'end' ricevuto
+
+    /**
+     * Dispatch SSE event: processa le linee data: accumulate.
+     * Segue la specifica SSE: linee data: multiple vengono unite con '\n'.
+     */
+    function dispatchEvent() {
+        if (dataBuffer.length === 0) { currentEvent = null; return; }
+        const data = dataBuffer.join('\n');
+        dataBuffer = [];
+
+        if (!currentEvent || currentEvent === 'message') {
+            fullResponse += data;
+            contentDiv.textContent = fullResponse;
+            scrollToBottom();
+        } else if (currentEvent === 'end') {
+            App.state.currentConversationId = data;
+            endReceived = true;
+        } else if (currentEvent === 'error') {
+            currentEvent = null;
+            throw new Error(data);
+        }
+        currentEvent = null;
+    }
+
+    /**
+     * Processa un blocco di testo SSE (può contenere più eventi).
+     */
+    function processChunk(text) {
+        const lines = text.split('\n');
+        // Se il testo non termina con \n, l'ultima linea è incompleta
+        if (!text.endsWith('\n')) {
+            remainder = lines.pop();
+        }
+        for (const line of lines) {
+            if (line === '') {
+                // Riga vuota = fine evento SSE → dispatch
+                dispatchEvent();
+            } else if (line.startsWith('event: ')) {
+                currentEvent = line.slice(7).trim();
+            } else if (line.startsWith('data: ')) {
+                dataBuffer.push(line.slice(6));
+            } else if (line.startsWith('data:')) {
+                // data: senza spazio (edge case spec)
+                dataBuffer.push(line.slice(5));
+            }
+            // Ignora linee con altri campi (id:, retry:, commenti ':')
+        }
+    }
+
+    // --- Ciclo di lettura stream ---
     while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        
+
         const chunk = remainder + decoder.decode(value, {stream: true});
         remainder = '';
-        const lines = chunk.split('\n');
-        
-        // L'ultima "linea" potrebbe essere incompleta — la teniamo per il prossimo chunk
-        if (!chunk.endsWith('\n')) {
-            remainder = lines.pop();
-        }
-        
-        for (const line of lines) {
-            if (line.startsWith('event: ')) {
-                currentEvent = line.slice(7).trim();
-            } else if (line.startsWith('data: ')) {
-                const data = line.slice(6);
-                
-                if (!currentEvent || currentEvent === 'message') {
-                    fullResponse += data;
-                    contentDiv.textContent = fullResponse;
-                    scrollToBottom();
-                } else if (currentEvent === 'end') {
-                    App.state.currentConversationId = data;
-                    // Render finale Markdown (dopo fine stream)
-                    contentDiv.innerHTML = renderMarkdown(fullResponse);
-                } else if (currentEvent === 'error') {
-                    throw new Error(data);
-                }
-                
-                currentEvent = null;
-            }
-        }
+        processChunk(chunk);
     }
+
     // Flush finale del decoder per caratteri multi-byte residui
-    const final = decoder.decode();
-    if (final) remainder += final;
+    const trailing = decoder.decode();
+    if (trailing) remainder += trailing;
+
+    // Processa eventuale remainder non ancora elaborato
+    if (remainder) {
+        processChunk(remainder + '\n');
+    }
+    // Dispatch finale se ci sono dati pendenti (stream chiuso senza riga vuota)
+    if (dataBuffer.length > 0) {
+        dispatchEvent();
+    }
+
+    // --- Render Markdown finale ---
+    // Esegui sempre il render a fine stream, sia che 'end' sia arrivato o meno
+    if (fullResponse) {
+        contentDiv.classList.add('markdown-body');
+        contentDiv.innerHTML = renderMarkdown(fullResponse);
+    }
 }
 
 // ============================================================================
@@ -1180,7 +1221,8 @@ function renderMarkdown(text) {
         const html = marked.parse(text, { breaks: true, gfm: true });
         return DOMPurify.sanitize(html);
     }
-    // Fallback: escape HTML
+    // Fallback: escape HTML (CDN non caricato)
+    console.warn('renderMarkdown: marked/DOMPurify non disponibili, fallback a escapeHTML');
     return escapeHTML(text);
 }
 
