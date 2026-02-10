@@ -294,9 +294,14 @@ class ToolExecutor:
         except Exception as e:
             return ToolResult(tool_id, False, "", str(e))
 
+    # P0-4: Rate limit e validazione per add_fact dal modello
+    _FACT_WRITES_PER_TURN = 5  # Max fatti scrivibili per turno
+    _MAX_FACT_KEY_LEN = 200
+    _MAX_FACT_VALUE_LEN = 2000
+
     def _exec_db(self, tool_id: str, tool_cfg: Dict, params: Dict) -> ToolResult:
         """
-        Query sulla memoria SQLite (sola lettura).
+        Query sulla memoria SQLite (sola lettura per search, write limitato per add_fact).
         Usato internamente dal planner per cercare nella memoria.
         """
         query = params.get("query", "")
@@ -308,13 +313,32 @@ class ToolExecutor:
                 results = self._memory_store.retrieve(query)
                 return ToolResult(tool_id, True, results or "Nessun risultato trovato")
             elif action == "add_fact":
-                key = params.get("key", "")
-                value = params.get("value", "")
-                if key and value:
-                    fid = self._memory_store.add_fact(key, value, source="ai_tool")
-                    return ToolResult(tool_id, True, f"Fatto salvato con ID {fid}")
-                return ToolResult(tool_id, False, "", "Chiave e valore richiesti")
+                key = params.get("key", "").strip()
+                value = params.get("value", "").strip()
+                if not key or not value:
+                    return ToolResult(tool_id, False, "", "Chiave e valore richiesti")
+                # Validazione lunghezza
+                if len(key) > self._MAX_FACT_KEY_LEN:
+                    return ToolResult(tool_id, False, "",
+                                      f"Chiave troppo lunga (max {self._MAX_FACT_KEY_LEN} chars)")
+                if len(value) > self._MAX_FACT_VALUE_LEN:
+                    return ToolResult(tool_id, False, "",
+                                      f"Valore troppo lungo (max {self._MAX_FACT_VALUE_LEN} chars)")
+                # Rate limiting per turno
+                count = getattr(self, "_fact_write_count", 0)
+                if count >= self._FACT_WRITES_PER_TURN:
+                    return ToolResult(tool_id, False, "",
+                                      f"Limite scritture raggiunto ({self._FACT_WRITES_PER_TURN}/turno)")
+                self._fact_write_count = count + 1
+                fid = self._memory_store.add_fact(key, value, source="ai_tool")
+                return ToolResult(tool_id, True, f"Fatto salvato con ID {fid}")
+            else:
+                return ToolResult(tool_id, False, "", f"Azione db sconosciuta: {action}")
         return ToolResult(tool_id, False, "", "Memory store non disponibile")
+
+    def reset_turn_limits(self) -> None:
+        """Resetta i contatori per-turno (chiamare ad inizio di ogni richiesta)"""
+        self._fact_write_count = 0
 
     def set_memory_store(self, store) -> None:
         """Inietta il riferimento alla MemoryStore per il tool db"""

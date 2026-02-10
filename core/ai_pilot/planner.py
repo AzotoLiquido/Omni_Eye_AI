@@ -12,6 +12,7 @@ Ottimizzato per modelli locali (7B-13B) con parsing robusto.
 
 import re
 import json
+import threading
 from typing import Dict, List, Optional, Tuple
 
 from .config_loader import PilotConfig
@@ -74,6 +75,7 @@ class ReActPlanner:
         self.tool_executor = tool_executor
         self.max_steps = cfg.planner_max_steps
         self.steps: List[PlanStep] = []
+        self._lock = threading.Lock()  # P1-7: thread safety per richieste concorrenti
 
     # ------------------------------------------------------------------
     # API pubblica
@@ -118,7 +120,7 @@ class ReActPlanner:
         score += sum(1 for kw in weak_keywords
                      if kw in msg_lower and kw not in matched_strong)
 
-        return score >= 2
+        return score >= 3
 
     def parse_model_output(self, output: str) -> PlanStep:
         """
@@ -157,20 +159,20 @@ class ReActPlanner:
 
         return step
 
-    def execute_step(self, step: PlanStep) -> str:
-        """Esegue l'azione di un PlanStep e restituisce l'osservazione"""
+    def execute_step(self, step: PlanStep) -> Tuple[str, bool]:
+        """Esegue l'azione di un PlanStep e restituisce (osservazione, success)"""
         if not step.action:
-            return ""
+            return "", True
 
         result = self.tool_executor.execute(step.action, step.action_params)
-        # P1-8: Preserve ToolResult.success in observation prefix
+        # P0-3 fix: ritorna il booleano success dal ToolResult
         if result.success:
             step.observation = result.output
         else:
             step.observation = f"ERRORE [{result.tool_id}]: {result.error}"
         self.steps.append(step)
 
-        return step.observation
+        return step.observation, result.success
 
     def build_continuation_prompt(self, step: PlanStep) -> str:
         """
@@ -196,11 +198,13 @@ class ReActPlanner:
 
     def get_history(self) -> List[Dict]:
         """Restituisce lo storico dei passi eseguiti"""
-        return [s.to_dict() for s in self.steps]
+        with self._lock:
+            return [s.to_dict() for s in self.steps]
 
     def reset(self) -> None:
         """Resetta lo stato del planner per una nuova richiesta"""
-        self.steps = []
+        with self._lock:
+            self.steps = []
 
     # ------------------------------------------------------------------
     # Parsing helpers
@@ -305,6 +309,10 @@ class SimplePlanner:
 
     def reset(self) -> None:
         pass
+
+    def get_history(self) -> List[Dict]:
+        """P2-4: interfaccia coerente con ReActPlanner"""
+        return []
 
 
 def create_planner(cfg: PilotConfig, tool_executor: ToolExecutor):

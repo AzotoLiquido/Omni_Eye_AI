@@ -120,7 +120,8 @@ class PromptBuilder:
     # ------------------------------------------------------------------
 
     def _section_identity(self) -> str:
-        meta = self.cfg.raw.get("meta", {})
+        # P2-2 fix: accesso diretto a _raw per evitare deepcopy ad ogni prompt
+        meta = self.cfg._raw.get("meta", {})
         desc = meta.get("description", "")
         custom = self.cfg.custom_instructions
         lines = [

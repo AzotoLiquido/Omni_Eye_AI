@@ -76,6 +76,9 @@ class Pilot:
         """
         self.logger.log_conversation_turn(conv_id, "user", user_message)
 
+        # Resetta limiti per-turno dei tool
+        self.tools.reset_turn_limits()
+
         memory_context = self.memory.retrieve(user_message) if user_message else ""
         available_tools = self.tools.get_available_tools()
 
@@ -169,11 +172,16 @@ class Pilot:
         # Post-processing
         response = self._post_process(response)
 
-        # Estrai fatti dal messaggio utente (apprendimento)
-        self._extract_and_store_facts(user_message, ai_engine)
-
-        # Log turno assistente
+        # Log turno assistente (sincrono — deve avvenire prima del return)
         self.logger.log_conversation_turn(conv_id, "assistant", response, metadata)
+
+        # P0-1 fix: estrai fatti in thread separato (era sincrono, bloccava 2-5s)
+        t = threading.Thread(
+            target=self._extract_and_store_facts,
+            args=(user_message, ai_engine),
+            daemon=True,
+        )
+        t.start()
 
         return response, metadata
 
@@ -200,49 +208,49 @@ class Pilot:
             user_message, conv_id
         )
 
-        if use_planning and isinstance(self.planner, ReActPlanner):
-            # Esegui il piano in modo sincrono, poi streamma il risultato finale
-            response, _ = self._run_react_loop(
-                user_message, conversation_history, system_prompt, ai_engine
-            )
-            response = self._post_process(response)
-
-            # Streamma la risposta finale chunk per chunk
-            for chunk in self._simulate_stream(response):
-                yield chunk
-        else:
-            # Streaming diretto dal modello
-            full_response = ""
-            for chunk in ai_engine.generate_response_stream(
-                user_message,
-                conversation_history=conversation_history,
-                system_prompt=system_prompt,
-                images=images,
-            ):
-                full_response += chunk
-                yield chunk
-
-            # Applica post-processing (artefatti ReAct già inviati
-            # in streaming non si possono ritirare, ma puliamo per il log)
-            response = self._post_process(full_response)
-
-        # P1-5: Use try/finally is not possible in yield-based generators
-        # so we ensure post-yield code runs by moving it here.
-        # This code executes only if the generator is fully consumed.
-        # For partial consumption, we rely on GeneratorExit handling.
+        # P0-2 fix: usa _stream_inner + post-processing in finally/GeneratorExit
+        # per garantire logging e fact extraction anche se il client disconnette.
+        response = ""
         try:
-            # Post-processing asincrono (estrazione fatti in thread separato)
-            t = threading.Thread(
-                target=self._extract_and_store_facts,
-                args=(user_message, ai_engine),
-                daemon=True,
-            )
-            t.start()
+            if use_planning and isinstance(self.planner, ReActPlanner):
+                # Esegui il piano in modo sincrono, poi streamma il risultato finale
+                response, _ = self._run_react_loop(
+                    user_message, conversation_history, system_prompt, ai_engine
+                )
+                response = self._post_process(response)
 
-            # Log turno assistente
-            self.logger.log_conversation_turn(conv_id, "assistant", response)
-        except Exception:
-            pass  # Non bloccare il generatore per errori di logging
+                for chunk in self._simulate_stream(response):
+                    yield chunk
+            else:
+                # Streaming diretto dal modello
+                full_response = ""
+                for chunk in ai_engine.generate_response_stream(
+                    user_message,
+                    conversation_history=conversation_history,
+                    system_prompt=system_prompt,
+                    images=images,
+                ):
+                    full_response += chunk
+                    yield chunk
+
+                # Post-processing per il log (artefatti ReAct già inviati)
+                response = self._post_process(full_response)
+        except GeneratorExit:
+            # Client disconnesso — esegui comunque cleanup
+            pass
+        finally:
+            # Garantito: logging + fact extraction sempre eseguiti
+            try:
+                if response:
+                    self.logger.log_conversation_turn(conv_id, "assistant", response)
+                t = threading.Thread(
+                    target=self._extract_and_store_facts,
+                    args=(user_message, ai_engine),
+                    daemon=True,
+                )
+                t.start()
+            except Exception:
+                pass  # Non bloccare per errori di logging
 
     # ==================================================================
     # CICLO REACT
@@ -306,11 +314,11 @@ class Pilot:
                     }, level="warn")
                     return output.strip(), metadata
 
-                observation = self.planner.execute_step(step)
+                observation, tool_success = self.planner.execute_step(step)
                 metadata["tools_called"].append(step.action)
 
-                # P2: Use ToolResult.success instead of string matching
-                tool_success = not observation.startswith("ERRORE")
+                # P0-3 fix: usa il booleano success da ToolResult
+                # (non più detection via stringa "ERRORE")
                 self.logger.log_tool_call(
                     step.action,
                     step.action_params,
@@ -365,10 +373,21 @@ class Pilot:
         """Oscura pattern che sembrano segreti/credenziali"""
         patterns = [
             # API keys generiche
-            (r'(?i)(api[_-]?key|token|secret|password)\s*[=:]\s*["\']?([a-zA-Z0-9_\-]{16,})["\']?',
+            (r'(?i)(api[_-]?key|token|secret|password|passwd|pwd)\s*[=:]\s*["\']?([a-zA-Z0-9_\-]{16,})["\']?',
              r'\1=***OSCURATO***'),
             # Bearer tokens
             (r'Bearer\s+[a-zA-Z0-9_\-\.]{20,}', 'Bearer ***OSCURATO***'),
+            # JWT tokens (header.payload.signature)
+            (r'eyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}',
+             '***JWT_OSCURATO***'),
+            # AWS access keys
+            (r'(?:AKIA|ASIA)[A-Z0-9]{16}', '***AWS_KEY_OSCURATO***'),
+            # Connection strings
+            (r'(?i)(?:mongodb|postgres|mysql|redis|amqp)://[^\s"\'>]+',
+             '***CONN_STRING_OSCURATA***'),
+            # SSH private keys
+            (r'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----',
+             '***CHIAVE_PRIVATA_OSCURATA***'),
         ]
         for pattern, replacement in patterns:
             text = re.sub(pattern, replacement, text)
