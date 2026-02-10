@@ -27,7 +27,7 @@
       "properties": {
         "engine": {
           "type": "string",
-          "enum": ["local_llm", "openai_api", "other_api"]
+          "enum": ["local_llm", "ollama", "openai_api", "other_api"]
         },
         "model": {
           "type": "object",
@@ -350,7 +350,7 @@
       "additionalProperties": false,
       "properties": {
         "id": { "type": "string", "pattern": "^[a-z0-9_\\-]+$" },
-        "type": { "type": "string", "enum": ["shell", "python", "http", "filesystem", "db", "custom"] },
+        "type": { "type": "string", "enum": ["shell", "python", "http", "filesystem", "db", "database", "custom"] },
         "enabled": { "type": "boolean", "default": true },
         "capabilities": {
           "type": "array",

@@ -411,8 +411,9 @@ class MemoryStore:
             max_chars = 2000
 
         # Guardia contro loop infinito
+        # P2-6 fix: cap overlap a metà chunk per evitare progresso troppo lento
         if overlap >= max_chars:
-            overlap = max(0, max_chars - 1)
+            overlap = max(0, max_chars // 2)
 
         if len(text) <= max_chars:
             return [text]

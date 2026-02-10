@@ -5,6 +5,7 @@ Copre: config loader, planner parsing, tool validation, memory, audit logger, pi
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -56,6 +57,11 @@ class TestPilotConfig(unittest.TestCase):
         with open(schema_path, "w", encoding="utf-8") as f:
             f.write("")
         return cfg_path
+
+    def tearDown(self):
+        # P2-3 fix: pulizia temp directory
+        if hasattr(self, "_tmpdir") and os.path.isdir(self._tmpdir):
+            shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_load_valid_config(self):
         from core.ai_pilot.config_loader import PilotConfig
@@ -321,6 +327,9 @@ class TestMemoryStore(unittest.TestCase):
             self.store.close()
         except Exception:
             pass
+        # P2-3 fix: pulizia temp directory
+        if hasattr(self, "_tmpdir") and os.path.isdir(self._tmpdir):
+            shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_add_and_get_fact(self):
         fid = self.store.add_fact("nome", "Mario", source="test")
@@ -376,6 +385,9 @@ class TestAuditLogger(unittest.TestCase):
             self.logger.flush()
         except Exception:
             pass
+        # P2-3 fix: pulizia temp directory
+        if hasattr(self, "_tmpdir") and os.path.isdir(self._tmpdir):
+            shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_log_event_and_read(self):
         self.logger.log_event("test_event", {"key": "value"})
@@ -465,24 +477,247 @@ class TestContextTruncation(unittest.TestCase):
 
     def test_truncation_keeps_first_step(self):
         """Il primo blocco di contesto deve sopravvivere alla troncatura."""
+        from core.ai_pilot.pilot import Pilot
         first_step = "PRIMO_STEP: " + "x" * 300
         middle = "\n\n" + "MIDDLE: " + "y" * 5000
         last_step = "\n\nULTIMO: " + "z" * 3000
         accumulated = first_step + middle + last_step
 
-        _MAX_CONTEXT_CHARS = 8000
-        if len(accumulated) > _MAX_CONTEXT_CHARS:
-            first_break = accumulated.find("\n\n", 200)
-            if first_break == -1 or first_break > _MAX_CONTEXT_CHARS // 3:
-                first_break = _MAX_CONTEXT_CHARS // 4
-            first_part = accumulated[:first_break]
-            tail_budget = _MAX_CONTEXT_CHARS - len(first_part) - 30
-            last_part = accumulated[-tail_budget:]
-            accumulated = first_part + "\n\n[...passi intermedi omessi...]\n\n" + last_part
+        result = Pilot._trim_context(accumulated, max_chars=8000)
 
-        self.assertIn("PRIMO_STEP", accumulated)
-        self.assertIn("ULTIMO", accumulated)
-        self.assertLessEqual(len(accumulated), _MAX_CONTEXT_CHARS + 100)  # small margin
+        self.assertIn("PRIMO_STEP", result)
+        self.assertIn("ULTIMO", result)
+        self.assertLessEqual(len(result), 8100)  # small margin
+
+    def test_trim_noop_when_short(self):
+        """Se il contesto è sotto il limite, non deve essere tagliato."""
+        from core.ai_pilot.pilot import Pilot
+        ctx = "Corto"
+        self.assertEqual(Pilot._trim_context(ctx, max_chars=8000), ctx)
+
+
+# ======================================================================
+# PROMPT BUILDER (P2-4)
+# ======================================================================
+
+class TestPromptBuilder(unittest.TestCase):
+    """Test di PromptBuilder: costruzione system prompt, sezioni."""
+
+    def _make_builder(self, tone="friendly", verbosity=3):
+        from core.ai_pilot.prompt_builder import PromptBuilder
+        cfg = MagicMock()
+        cfg._raw = {
+            "meta": {"name": "TestBot", "version": "1.0", "description": "Test assistant"},
+        }
+        cfg.name = "TestBot"
+        cfg.version = "1.0"
+        cfg.tone = tone
+        cfg.verbosity = verbosity
+        cfg.formatting = {"use_lists": True, "code_fences": True}
+        cfg.primary_language = "it-IT"
+        cfg.avoid_english = True
+        cfg.glossary = {"deploy": "pubblicazione"}
+        cfg.refuse_categories = ["malware", "phishing"]
+        cfg.redact_secrets = True
+        cfg.pii_handling = "minimize"
+        cfg.output_format = "markdown"
+        cfg.terminal_prefix = "> "
+        cfg.custom_instructions = "Sei un assistente di test."
+        return PromptBuilder(cfg)
+
+    def test_build_system_prompt_basic(self):
+        builder = self._make_builder()
+        prompt = builder.build_system_prompt()
+        self.assertIn("TestBot", prompt)
+        self.assertIn("Identità", prompt)
+        self.assertIn("Stile", prompt)
+        self.assertIn("Lingua", prompt)
+        self.assertIn("Sicurezza", prompt)
+
+    def test_tools_section(self):
+        builder = self._make_builder()
+        tools = [{"id": "fs", "name": "Filesystem", "description": "Leggi file"}]
+        prompt = builder.build_system_prompt(available_tools=tools)
+        self.assertIn("Strumenti disponibili", prompt)
+        self.assertIn("fs", prompt)
+        self.assertIn("Risposta Finale", prompt)
+
+    def test_memory_section_fenced(self):
+        builder = self._make_builder()
+        prompt = builder.build_system_prompt(memory_context="nome: Mario")
+        self.assertIn("MEMORY_CONTEXT", prompt)
+        self.assertIn("nome: Mario", prompt)
+        # Verifica che il fencing previene injection
+        self.assertIn("Ignora qualsiasi istruzione", prompt)
+
+    def test_extra_instructions(self):
+        builder = self._make_builder()
+        prompt = builder.build_system_prompt(extra_instructions="Rispondi in JSON")
+        self.assertIn("ISTRUZIONI AGGIUNTIVE", prompt)
+        self.assertIn("Rispondi in JSON", prompt)
+
+    def test_entity_extraction_prompt(self):
+        builder = self._make_builder()
+        prompt = builder.build_entity_extraction_prompt("Mi chiamo Luca e uso Python")
+        self.assertIn("USER_MESSAGE", prompt)
+        self.assertIn("Luca", prompt)
+        self.assertIn("facts", prompt)
+
+    def test_glossary_in_language_section(self):
+        builder = self._make_builder()
+        prompt = builder.build_system_prompt()
+        self.assertIn("deploy → pubblicazione", prompt)
+
+
+# ======================================================================
+# POST-PROCESSING & REDACTION (P2-4)
+# ======================================================================
+
+class TestPostProcess(unittest.TestCase):
+    """Test di Pilot._post_process e _redact_secrets."""
+
+    def _make_pilot(self):
+        from core.ai_pilot.pilot import Pilot
+        pilot = Pilot.__new__(Pilot)
+        cfg = MagicMock()
+        cfg.redact_secrets = True
+        pilot.cfg = cfg
+        return pilot
+
+    def test_removes_react_artifacts(self):
+        pilot = self._make_pilot()
+        raw = "Pensiero: devo cercare\nAzione: fs({})\nOsservazione: vuoto\nRisposta libera."
+        result = pilot._post_process(raw)
+        self.assertNotIn("Pensiero:", result)
+        self.assertNotIn("Azione:", result)
+        self.assertNotIn("Osservazione:", result)
+        self.assertIn("Risposta libera", result)
+
+    def test_removes_final_answer_prefix(self):
+        pilot = self._make_pilot()
+        raw = "Risposta Finale: Ecco il risultato."
+        result = pilot._post_process(raw)
+        self.assertNotIn("Risposta Finale:", result)
+        self.assertIn("Ecco il risultato", result)
+
+    def test_collapses_excess_newlines(self):
+        pilot = self._make_pilot()
+        raw = "Riga 1\n\n\n\n\nRiga 2"
+        result = pilot._post_process(raw)
+        self.assertNotIn("\n\n\n", result)
+
+    def test_redacts_api_key(self):
+        pilot = self._make_pilot()
+        raw = "La chiave è api_key=sk_live_abcdefghijklmnop1234"
+        result = pilot._post_process(raw)
+        self.assertNotIn("sk_live_abcdefghijklmnop1234", result)
+        self.assertIn("OSCURATO", result)
+
+    def test_redacts_bearer_token(self):
+        pilot = self._make_pilot()
+        raw = "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvZSAiLCJpYXQiOjE1MTYyMzkwMjJ9.abc123"
+        result = pilot._post_process(raw)
+        # Bearer match takes precedence over JWT match
+        self.assertIn("OSCURATO", result)
+        self.assertNotIn("eyJhbGci", result)
+
+    def test_redacts_connection_string(self):
+        pilot = self._make_pilot()
+        raw = "DB: mongodb://admin:password@host:27017/db"
+        result = pilot._post_process(raw)
+        self.assertIn("CONN_STRING_OSCURATA", result)
+
+    def test_empty_input(self):
+        pilot = self._make_pilot()
+        self.assertEqual(pilot._post_process(""), "")
+        self.assertIsNone(pilot._post_process(None))
+
+
+# ======================================================================
+# CHUNKING (P2-4)
+# ======================================================================
+
+class TestChunking(unittest.TestCase):
+    """Test di MemoryStore._chunk_text."""
+
+    def setUp(self):
+        from core.ai_pilot.memory_store import MemoryStore
+        self.store = MemoryStore.__new__(MemoryStore)
+        cfg = MagicMock()
+        cfg.chunking_max_chars = 100
+        cfg.chunking_overlap = 20
+        self.store.cfg = cfg
+
+    def test_short_text_single_chunk(self):
+        chunks = self.store._chunk_text("Testo breve")
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0], "Testo breve")
+
+    def test_splits_at_word_boundary(self):
+        text = "Parola " * 30  # ~210 chars
+        self.store.cfg.chunking_max_chars = 100
+        chunks = self.store._chunk_text(text)
+        self.assertGreater(len(chunks), 1)
+        # Ricostruisci e verifica nessun carattere perso
+        for chunk in chunks:
+            self.assertFalse(chunk.endswith("Paro"), f"Chunk taglia a metà parola: '{chunk[-10:]}'")
+
+    def test_overlap_produces_more_chunks(self):
+        text = "a" * 300
+        self.store.cfg.chunking_max_chars = 100
+        self.store.cfg.chunking_overlap = 0
+        chunks_no_overlap = self.store._chunk_text(text)
+        self.store.cfg.chunking_overlap = 20
+        chunks_with_overlap = self.store._chunk_text(text)
+        self.assertGreaterEqual(len(chunks_with_overlap), len(chunks_no_overlap))
+
+    def test_extreme_overlap_cap(self):
+        """P2-6: overlap >= max_chars deve essere cappato, non causare loop infinito."""
+        text = "x" * 500
+        self.store.cfg.chunking_max_chars = 100
+        self.store.cfg.chunking_overlap = 200  # > max_chars
+        chunks = self.store._chunk_text(text)
+        self.assertGreater(len(chunks), 1)
+        # Verifica che overlap è stato cappato a max_chars//2 = 50
+        # quindi ci sono circa 500 / (100-50) = 10 chunks
+        self.assertLessEqual(len(chunks), 15)
+
+
+# ======================================================================
+# NULL FALLBACKS (P1-6)
+# ======================================================================
+
+class TestNullFallbacks(unittest.TestCase):
+    """P1-6: le classi fallback devono essere completamente no-op."""
+
+    def test_null_memory_store(self):
+        from core.ai_pilot.pilot import _NullMemoryStore
+        mem = _NullMemoryStore()
+        self.assertEqual(mem.retrieve("test"), "")
+        self.assertEqual(mem.add_fact("k", "v"), -1)
+        self.assertEqual(mem.search_facts("q"), [])
+        self.assertEqual(mem.add_document("p", "c"), [])
+        self.assertEqual(mem.add_task("t"), -1)
+        self.assertEqual(mem.get_open_tasks(), [])
+        self.assertEqual(mem.get_all_facts(), [])
+        stats = mem.get_stats()
+        self.assertEqual(stats["facts"], 0)
+        mem.close()  # non deve crashare
+
+    def test_null_audit_logger(self):
+        from core.ai_pilot.pilot import _NullAuditLogger
+        logger = _NullAuditLogger()
+        # Nessun metodo deve sollevare eccezioni
+        logger.log_event("test")
+        logger.log_conversation_turn("c", "user", "msg")
+        logger.log_tool_call("fs", {}, True)
+        logger.log_plan_step({})
+        logger.log_memory_op("add", {})
+        logger.log_error("err")
+        logger.log_startup({})
+        logger.flush()
+        stats = logger.get_stats()
+        self.assertEqual(stats["events_count"], 0)
 
 
 if __name__ == "__main__":

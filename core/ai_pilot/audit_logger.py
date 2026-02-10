@@ -297,7 +297,7 @@ class AuditLogger:
             return []
 
     def get_stats(self) -> Dict:
-        """Statistiche sui log"""
+        """Statistiche sui log (include entry nel buffer pendente)"""
         def _count_lines(path: Path) -> int:
             if not path.exists():
                 return 0
@@ -307,9 +307,13 @@ class AuditLogger:
             except Exception:
                 return 0
 
+        with self._buf_lock:
+            buf_events = len(self._buffers.get(self._events_path, []))
+            buf_convs = len(self._buffers.get(self._conversations_path, []))
+
         return {
-            "events_count": _count_lines(self._events_path),
-            "conversations_count": _count_lines(self._conversations_path),
+            "events_count": _count_lines(self._events_path) + buf_events,
+            "conversations_count": _count_lines(self._conversations_path) + buf_convs,
             "events_path": str(self._events_path),
             "conversations_path": str(self._conversations_path),
         }

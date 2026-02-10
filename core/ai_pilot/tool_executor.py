@@ -49,6 +49,9 @@ class ToolResult:
 class ToolExecutor:
     """Registry e esecuzione sandboxed dei tool"""
 
+    # P1-3 fix: classe-level, non ri-allocato ad ogni execute()
+    _ID_TYPE = {"fs": "filesystem", "py": "python", "sh": "shell", "db": "db"}
+
     def __init__(self, cfg: PilotConfig):
         self.cfg = cfg
 
@@ -102,9 +105,7 @@ class ToolExecutor:
         if policy == "never":
             return ToolResult(tool_id, False, "", f"Tool '{tool_id}' bloccato dalla policy")
 
-        # Mappa ID config → tipo handler (il config può non avere "type")
-        _ID_TYPE = {"fs": "filesystem", "py": "python", "sh": "shell", "db": "db"}
-        tool_type = _ID_TYPE.get(tool_id, tool_cfg.get("type", tool_id))
+        tool_type = self._ID_TYPE.get(tool_id, tool_cfg.get("type", tool_id))
         handler = self._handlers.get(tool_type)
         if not handler:
             return ToolResult(tool_id, False, "", f"Tipo tool '{tool_type}' non supportato")
@@ -159,6 +160,19 @@ class ToolExecutor:
         "base64", "binascii", "struct", "codecs", "difflib",
     })
 
+    # P1-2 fix: frozenset a livello di classe (non ri-allocato per ogni nodo AST)
+    _SAFE_DUNDERS = frozenset({
+        "__init__", "__str__", "__repr__", "__len__",
+        "__iter__", "__next__", "__enter__", "__exit__",
+        "__getitem__", "__setitem__", "__contains__",
+    })
+
+    # P2-1 fix: comandi shell consentiti a livello di classe
+    _ALLOWED_SH_COMMANDS = frozenset({
+        "ls", "dir", "cat", "type", "echo", "pwd", "cd",
+        "head", "tail", "wc", "find", "grep", "sort",
+    })
+
     @classmethod
     def _validate_python_ast(cls, code: str) -> Optional[str]:
         """Validate Python code via AST — returns error string or None if safe."""
@@ -191,13 +205,10 @@ class ToolExecutor:
                     "__import__", "__subclasses__",
                 ):
                     return f"Attributo non consentito: .{func.attr}"
-            # Block access to dunder attributes (except __init__, __str__, etc.)
+            # Block access to dunder attributes (except safe ones)
             elif isinstance(node, ast.Attribute):
                 if node.attr.startswith("__") and node.attr.endswith("__"):
-                    _safe_dunders = {"__init__", "__str__", "__repr__", "__len__",
-                                     "__iter__", "__next__", "__enter__", "__exit__",
-                                     "__getitem__", "__setitem__", "__contains__"}
-                    if node.attr not in _safe_dunders:
+                    if node.attr not in cls._SAFE_DUNDERS:
                         return f"Accesso dunder non consentito: {node.attr}"
         return None
 
@@ -254,11 +265,6 @@ class ToolExecutor:
                               "Comando contiene metacaratteri shell non consentiti")
 
         # Allowlist: solo comandi esplicitamente autorizzati
-        ALLOWED_COMMANDS = {
-            "ls", "dir", "cat", "type", "echo", "pwd", "cd",
-            "head", "tail", "wc", "find", "grep", "sort",
-        }
-
         try:
             # P1-10: Use posix=False on Windows to handle backslash paths correctly
             args = shlex.split(command, posix=(os.name != 'nt'))
@@ -269,10 +275,10 @@ class ToolExecutor:
             return ToolResult(tool_id, False, "", "Nessun comando fornito")
 
         base_cmd = args[0].lower().rstrip('.exe')
-        if base_cmd not in ALLOWED_COMMANDS:
+        if base_cmd not in self._ALLOWED_SH_COMMANDS:
             return ToolResult(tool_id, False, "",
                               f"Comando '{base_cmd}' non in allowlist. "
-                              f"Comandi consentiti: {', '.join(sorted(ALLOWED_COMMANDS))}")
+                              f"Comandi consentiti: {', '.join(sorted(self._ALLOWED_SH_COMMANDS))}")
 
         try:
             result = subprocess.run(

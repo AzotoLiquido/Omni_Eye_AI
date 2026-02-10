@@ -15,9 +15,10 @@ Offre due modalità:
 """
 
 import json
+import logging
 import re
 import threading
-from typing import Dict, Generator, List, Tuple
+from typing import Callable, Dict, Generator, List, Optional, Tuple
 
 from .config_loader import PilotConfig
 from .prompt_builder import PromptBuilder
@@ -26,6 +27,11 @@ from .tool_executor import ToolExecutor
 from .planner import ReActPlanner, SimplePlanner, PlanStep, create_planner
 from .audit_logger import AuditLogger
 
+_log = logging.getLogger(__name__)
+
+# P1-4 fix: limite fatti estratti automaticamente per turno
+_MAX_AUTO_FACTS_PER_TURN = 3
+
 
 class Pilot:
     """Orchestratore principale del Pilot AI"""
@@ -33,20 +39,38 @@ class Pilot:
     def __init__(self, config_path: str = None):
         """
         Inizializza tutti i sotto-sistemi.
+        P1-6 fix: degrada con grazia se un sottosistema fallisce.
 
         Args:
             config_path: Percorso al file assistant.config.json (opzionale)
         """
-        # 1. Carica configurazione
+        # 1. Carica configurazione (critica — senza config non possiamo procedere)
         self.cfg = PilotConfig(config_path=config_path)
 
-        # 2. Inizializza sotto-sistemi
+        # P2-8 fix: lock per proteggere reload_config da richieste concorrenti
+        self._reload_lock = threading.Lock()
+
+        # P1-4 fix: contatore fatti estratti per turno
+        self._auto_fact_count = 0
+
+        # 2. Inizializza sotto-sistemi con degradazione graceful
         self.prompt_builder = PromptBuilder(self.cfg)
-        self.memory = MemoryStore(self.cfg)
+
+        try:
+            self.memory = MemoryStore(self.cfg)
+        except Exception as e:
+            _log.error("MemoryStore init fallita, uso fallback in-memory: %s", e)
+            self.memory = _NullMemoryStore()
+
         self.tools = ToolExecutor(self.cfg)
-        self.tools.set_memory_store(self.memory)  # Inietta memoria nel tool db
+        self.tools.set_memory_store(self.memory)
         self.planner = create_planner(self.cfg, self.tools)
-        self.logger = AuditLogger(self.cfg)
+
+        try:
+            self.logger = AuditLogger(self.cfg)
+        except Exception as e:
+            _log.error("AuditLogger init fallita, uso fallback no-op: %s", e)
+            self.logger = _NullAuditLogger()
 
         # Log startup
         self.logger.log_startup({
@@ -79,6 +103,8 @@ class Pilot:
 
         # Resetta limiti per-turno dei tool
         self.tools.reset_turn_limits()
+        # P1-4 fix: resetta contatore fatti auto-estratti
+        self._auto_fact_count = 0
 
         memory_context = self.memory.retrieve(user_message) if user_message else ""
         available_tools = self.tools.get_available_tools()
@@ -276,94 +302,17 @@ class Pilot:
         Returns:
             (risposta_finale, metadata_piano)
         """
-        self.planner.reset()
-        metadata = {"steps": [], "tools_called": []}
-
-        # Primo turno: chiedi al modello cosa fare
-        current_prompt = user_message
-        accumulated_context = ""
-        output = ""
-        max_tool_calls = self.cfg.max_tool_calls  # Cross-cutting: enforce limit
-        # P2: Cap accumulated_context size to prevent unbounded growth
-        _MAX_CONTEXT_CHARS = 8000
-        tools_called_count = 0
-
-        for i in range(self.cfg.planner_max_steps):
-            # Genera ragionamento dal modello
-            full_prompt = current_prompt
-            if accumulated_context:
-                full_prompt = f"{accumulated_context}\n\nOra rispondi alla richiesta originale."
-
-            output = ai_engine.generate_response(
-                full_prompt,
-                conversation_history=conversation_history,
-                system_prompt=system_prompt,
-            )
-
-            # Parsa l'output
-            step = self.planner.parse_model_output(output)
-
-            # Log del passo
-            self.logger.log_plan_step(step.to_dict())
-            metadata["steps"].append(step.to_dict())
-
-            # Se è la risposta finale, restituiscila
-            if step.is_final:
-                return step.final_answer, metadata
-
-            # Se c'è un'azione, eseguila
-            if step.action:
-                # Cross-cutting: enforce max_tool_calls
-                tools_called_count += 1
-                if tools_called_count > max_tool_calls:
-                    self.logger.log_event("max_tool_calls_exceeded", {
-                        "limit": max_tool_calls,
-                    }, level="warn")
-                    return output.strip(), metadata
-
-                observation, tool_success = self.planner.execute_step(step)
-                metadata["tools_called"].append(step.action)
-
-                # P0-3 fix: usa il booleano success da ToolResult
-                # (non più detection via stringa "ERRORE")
-                self.logger.log_tool_call(
-                    step.action,
-                    step.action_params,
-                    tool_success,
-                    observation,
-                )
-
-                # Costruisci il contesto per il prossimo turno (accumula)
-                new_context = self.planner.build_continuation_prompt(step)
-                accumulated_context += "\n" + new_context
-                # P2: Trim accumulated context to prevent unbounded growth
-                # P1-3 fix: mantieni il primo step + ultimi step invece di
-                # tagliare dall'inizio (perdeva il contesto iniziale)
-                if len(accumulated_context) > _MAX_CONTEXT_CHARS:
-                    # Trova la fine del primo blocco di contesto (primo \n\n)
-                    first_break = accumulated_context.find("\n\n", 200)
-                    if first_break == -1 or first_break > _MAX_CONTEXT_CHARS // 3:
-                        first_break = _MAX_CONTEXT_CHARS // 4
-                    first_part = accumulated_context[:first_break]
-                    tail_budget = _MAX_CONTEXT_CHARS - len(first_part) - 30
-                    last_part = accumulated_context[-tail_budget:]
-                    accumulated_context = (
-                        first_part
-                        + "\n\n[...passi intermedi omessi...]\n\n"
-                        + last_part
-                    )
-            else:
-                # Nessuna azione ma nemmeno risposta finale → forza uscita
-                return output.strip(), metadata
-
-        # Max step raggiunto
-        self.logger.log_event("react_max_steps", {
-            "steps": len(metadata["steps"]),
-            "max": self.cfg.planner_max_steps,
-        }, level="warn")
-
-        # Usa l'ultimo output come risposta
-        return output.strip(), metadata
+        # P1-1 fix: delega al core condiviso con on_step=None (non-streaming)
+        final_answer = ""
+        metadata: Dict = {}
+        for msg_type, content in self._react_loop_core(
+            user_message, conversation_history, system_prompt, ai_engine
+        ):
+            if msg_type == "answer":
+                final_answer = content
+            elif msg_type == "meta":
+                metadata = content
+        return final_answer, metadata
 
     def _run_react_loop_streaming(
         self,
@@ -380,20 +329,45 @@ class Pilot:
             ("status", testo_stato) — aggiornamento intermedio
             ("answer", risposta_finale) — risposta da post-processare e streammare
         """
-        self.planner.reset()
-        metadata = {"steps": [], "tools_called": []}
+        for msg_type, content in self._react_loop_core(
+            user_message, conversation_history, system_prompt, ai_engine,
+            emit_status=True,
+        ):
+            if msg_type != "meta":
+                yield (msg_type, content)
 
-        current_prompt = user_message
+    # ------------------------------------------------------------------
+    # Cuore condiviso del ciclo ReAct (P1-1 DRY)
+    # ------------------------------------------------------------------
+
+    _MAX_CONTEXT_CHARS = 8000
+
+    def _react_loop_core(
+        self,
+        user_message: str,
+        conversation_history: List[Dict],
+        system_prompt: str,
+        ai_engine,
+        emit_status: bool = False,
+    ) -> Generator[Tuple[str, any], None, None]:
+        """
+        Implementazione unica del ciclo ReAct.
+        Yield: ("status", text), ("answer", text), ("meta", dict).
+        emit_status=True per streaming (emette "status"), False per sync.
+        """
+        self.planner.reset()
+        metadata: Dict = {"steps": [], "tools_called": []}
+
         accumulated_context = ""
         output = ""
         max_tool_calls = self.cfg.max_tool_calls
-        _MAX_CONTEXT_CHARS = 8000
         tools_called_count = 0
 
         for i in range(self.cfg.planner_max_steps):
-            yield ("status", f"\n\n> 🔄 *Passo {i + 1}: ragionamento...*\n")
+            if emit_status:
+                yield ("status", f"\n\n> 🔄 *Passo {i + 1}: ragionamento...*\n")
 
-            full_prompt = current_prompt
+            full_prompt = user_message
             if accumulated_context:
                 full_prompt = f"{accumulated_context}\n\nOra rispondi alla richiesta originale."
 
@@ -408,6 +382,7 @@ class Pilot:
             metadata["steps"].append(step.to_dict())
 
             if step.is_final:
+                yield ("meta", metadata)
                 yield ("answer", step.final_answer)
                 return
 
@@ -417,15 +392,19 @@ class Pilot:
                     self.logger.log_event("max_tool_calls_exceeded", {
                         "limit": max_tool_calls,
                     }, level="warn")
+                    yield ("meta", metadata)
                     yield ("answer", output.strip())
                     return
 
-                yield ("status", f"> ⚙️ *Strumento: {step.action}*\n")
+                if emit_status:
+                    yield ("status", f"> ⚙️ *Strumento: {step.action}*\n")
+
                 observation, tool_success = self.planner.execute_step(step)
                 metadata["tools_called"].append(step.action)
 
-                status_icon = "✅" if tool_success else "❌"
-                yield ("status", f"> {status_icon} *Risultato ottenuto*\n")
+                if emit_status:
+                    icon = "✅" if tool_success else "❌"
+                    yield ("status", f"> {icon} *Risultato ottenuto*\n")
 
                 self.logger.log_tool_call(
                     step.action, step.action_params, tool_success, observation,
@@ -433,19 +412,9 @@ class Pilot:
 
                 new_context = self.planner.build_continuation_prompt(step)
                 accumulated_context += "\n" + new_context
-                if len(accumulated_context) > _MAX_CONTEXT_CHARS:
-                    first_break = accumulated_context.find("\n\n", 200)
-                    if first_break == -1 or first_break > _MAX_CONTEXT_CHARS // 3:
-                        first_break = _MAX_CONTEXT_CHARS // 4
-                    first_part = accumulated_context[:first_break]
-                    tail_budget = _MAX_CONTEXT_CHARS - len(first_part) - 30
-                    last_part = accumulated_context[-tail_budget:]
-                    accumulated_context = (
-                        first_part
-                        + "\n\n[...passi intermedi omessi...]\n\n"
-                        + last_part
-                    )
+                accumulated_context = self._trim_context(accumulated_context)
             else:
+                yield ("meta", metadata)
                 yield ("answer", output.strip())
                 return
 
@@ -453,7 +422,21 @@ class Pilot:
             "steps": len(metadata["steps"]),
             "max": self.cfg.planner_max_steps,
         }, level="warn")
+        yield ("meta", metadata)
         yield ("answer", output.strip())
+
+    @staticmethod
+    def _trim_context(ctx: str, max_chars: int = 8000) -> str:
+        """Tronca il contesto accumulato mantenendo primo + ultimo blocco."""
+        if len(ctx) <= max_chars:
+            return ctx
+        first_break = ctx.find("\n\n", 200)
+        if first_break == -1 or first_break > max_chars // 3:
+            first_break = max_chars // 4
+        first_part = ctx[:first_break]
+        tail_budget = max_chars - len(first_part) - 30
+        last_part = ctx[-tail_budget:]
+        return first_part + "\n\n[...passi intermedi omessi...]\n\n" + last_part
 
     # ==================================================================
     # POST-PROCESSING
@@ -511,44 +494,47 @@ class Pilot:
         """
         Usa il modello per estrarre fatti memorizzabili dal messaggio utente.
         Eseguita in un thread separato per non bloccare la risposta.
+        P1-4 fix: applica rate-limit anche ai fatti estratti automaticamente.
         """
         # Messaggi troppo corti non contengono fatti
         if len(user_message) < 20:
             return
 
-        def _do_extract():
-            try:
-                prompt = self.prompt_builder.build_entity_extraction_prompt(user_message)
-                extraction = ai_engine.generate_response(
-                    prompt,
-                    system_prompt="Sei un estrattore di informazioni. Rispondi SOLO in JSON valido.",
-                )
-
-                # Parsa il JSON
-                extraction = extraction.strip()
-                # Rimuovi eventuale code fence
-                if extraction.startswith("```"):
-                    extraction = re.sub(r"```\w*\n?", "", extraction).strip()
-
-                data = json.loads(extraction)
-                facts = data.get("facts", [])
-
-                for fact in facts:
-                    key = fact.get("key", "").strip()
-                    value = fact.get("value", "").strip()
-                    if key and value:
-                        self.memory.add_fact(key, value, source="auto_extraction")
-                        self.logger.log_memory_op("add_fact", {"key": key, "value": value[:100]})
-
-            except (json.JSONDecodeError, KeyError, TypeError):
-                pass  # Estrazione fallita, non critico
-            except Exception as e:
-                self.logger.log_error("Errore estrazione fatti", e)
-
         try:
-            _do_extract()
-        except Exception:
-            pass  # Estrazione non critica, non blocca la risposta
+            prompt = self.prompt_builder.build_entity_extraction_prompt(user_message)
+            extraction = ai_engine.generate_response(
+                prompt,
+                system_prompt="Sei un estrattore di informazioni. Rispondi SOLO in JSON valido.",
+            )
+
+            # Parsa il JSON
+            extraction = extraction.strip()
+            # Rimuovi eventuale code fence
+            if extraction.startswith("```"):
+                extraction = re.sub(r"```\w*\n?", "", extraction).strip()
+
+            data = json.loads(extraction)
+            facts = data.get("facts", [])
+
+            for fact in facts:
+                # P1-4 fix: rate-limit fatti auto-estratti
+                if self._auto_fact_count >= _MAX_AUTO_FACTS_PER_TURN:
+                    self.logger.log_event("auto_fact_limit_reached", {
+                        "limit": _MAX_AUTO_FACTS_PER_TURN,
+                    }, level="debug")
+                    break
+
+                key = fact.get("key", "").strip()
+                value = fact.get("value", "").strip()
+                if key and value:
+                    self.memory.add_fact(key, value, source="auto_extraction")
+                    self._auto_fact_count += 1
+                    self.logger.log_memory_op("add_fact", {"key": key, "value": value[:100]})
+
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass  # Estrazione fallita, non critico
+        except Exception as e:
+            self.logger.log_error("Errore estrazione fatti", e)
 
     # ==================================================================
     # API MEMORIA (esposta per l'app)
@@ -626,17 +612,49 @@ class Pilot:
         }
 
     def reload_config(self) -> None:
-        """Ricarica la configurazione da disco e propaga ai subsystem."""
-        self.cfg.reload()
-        # Cross-cutting: propagate config changes to subsystems
-        self.tools = ToolExecutor(self.cfg)
-        self.tools.set_memory_store(self.memory)
-        self.planner = create_planner(self.cfg, self.tools)
-        self.prompt_builder = PromptBuilder(self.cfg)
-        self.logger.log_event("config_reload", {"version": self.cfg.version})
+        """Ricarica la configurazione da disco e propaga ai subsystem.
+        P2-8 fix: protetto da lock per evitare race condition con richieste in-flight.
+        """
+        with self._reload_lock:
+            self.cfg.reload()
+            self.tools = ToolExecutor(self.cfg)
+            self.tools.set_memory_store(self.memory)
+            self.planner = create_planner(self.cfg, self.tools)
+            self.prompt_builder = PromptBuilder(self.cfg)
+            self.logger.log_event("config_reload", {"version": self.cfg.version})
 
     def shutdown(self) -> None:
         """Chiusura pulita"""
         self.logger.log_event("pilot_shutdown", {})
         self.logger.flush()  # Svuota il buffer JSONL su disco
         self.memory.close()
+
+
+# ======================================================================
+# Fallback no-op per degradazione graceful (P1-6)
+# ======================================================================
+
+class _NullMemoryStore:
+    """MemoryStore di fallback quando il DB non è disponibile."""
+    def retrieve(self, *a, **kw) -> str: return ""
+    def add_fact(self, *a, **kw) -> int: return -1
+    def search_facts(self, *a, **kw) -> list: return []
+    def add_document(self, *a, **kw) -> list: return []
+    def add_task(self, *a, **kw) -> int: return -1
+    def get_open_tasks(self, *a, **kw) -> list: return []
+    def get_all_facts(self, *a, **kw) -> list: return []
+    def get_stats(self) -> dict: return {"facts": 0, "tasks": 0, "document_chunks": 0, "db_path": "N/A (fallback)"}
+    def close(self) -> None: pass
+
+
+class _NullAuditLogger:
+    """AuditLogger di fallback quando i log non possono essere scritti."""
+    def log_event(self, *a, **kw) -> None: pass
+    def log_conversation_turn(self, *a, **kw) -> None: pass
+    def log_tool_call(self, *a, **kw) -> None: pass
+    def log_plan_step(self, *a, **kw) -> None: pass
+    def log_memory_op(self, *a, **kw) -> None: pass
+    def log_error(self, *a, **kw) -> None: pass
+    def log_startup(self, *a, **kw) -> None: pass
+    def flush(self) -> None: pass
+    def get_stats(self) -> dict: return {"events_count": 0, "conversations_count": 0}
