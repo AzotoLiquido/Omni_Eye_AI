@@ -111,6 +111,13 @@ _FILLER_WORDS = re.compile(
     re.IGNORECASE,
 )
 
+# Filler per domande fattuali (meno aggressivo, toglie solo la parte interrogativa)
+_FACTUAL_FILLER = re.compile(
+    r"\b(?:chi|cos|cosa|quand[oi]|quant[oiae]|dov|dove|qual|com|perch[eé])"
+    r"(?:['’])?\s*(?:[eè]|era|sono|erano|ha|hanno|costa|costano|vale|pesa|si\s+trova)?\b",
+    re.IGNORECASE,
+)
+
 
 def _clean_query(message: str) -> str:
     """Rimuove parole filler dal messaggio per ottenere una query di ricerca pulita."""
@@ -275,8 +282,18 @@ def search_and_format(message: str, max_results: int = 5) -> Optional[dict]:
         return None
 
     youtube = is_youtube_query(message) if explicit else False
-    clean_q = _clean_query(message) if explicit else message.strip()
-    results = web_search(clean_q, max_results=max_results, youtube=youtube)
+    clean_q = _clean_query(message) if explicit else _clean_factual_query(message)
+
+    # Per domande fattuali: cerca preferibilmente su Wikipedia
+    if factual and not youtube:
+        results = web_search(
+            f"wikipedia {clean_q}", max_results=max_results, region="it-it",
+        )
+        # Fallback: se Wikipedia non dà risultati, cerca normalmente
+        if not results:
+            results = web_search(clean_q, max_results=max_results)
+    else:
+        results = web_search(clean_q, max_results=max_results, youtube=youtube)
     if not results:
         return None
 
@@ -298,6 +315,27 @@ def search_and_format(message: str, max_results: int = 5) -> Optional[dict]:
         }
 
 
+def _clean_factual_query(message: str) -> str:
+    """Pulisce una domanda fattuale per ottenere una query di ricerca efficace."""
+    # Rimuovi la parte interrogativa (italiano)
+    cleaned = _FACTUAL_FILLER.sub(" ", message)
+    # Rimuovi pattern inglesi
+    cleaned = re.sub(
+        r"\b(?:who|what|when|where|how)\s+(?:is|are|was|were|does|did|do|much|many|old|tall|long|far|big)"
+        r"(?:\s+(?:a|an|the|does|did|do|is|it|cost))?\b",
+        " ", cleaned, flags=re.IGNORECASE,
+    )
+    # Rimuovi "notizie su/di", "ultime notizie"
+    cleaned = re.sub(r"\b(?:ultime\s+)?notizi[ae]\s+(?:su|di|riguardo)\b", " ", cleaned, flags=re.IGNORECASE)
+    # Rimuovi punteggiatura interrogativa e apostrofi isolati
+    cleaned = re.sub(r"[?!]", "", cleaned)
+    cleaned = re.sub(r"(?:^|\s)['\u2019](?:\s|$)", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if len(cleaned) < 3:
+        return message.strip()
+    return cleaned
+
+
 def _format_augmented_context(results: List[Dict[str, str]], query: str = "") -> str:
     """
     Formatta i risultati come contesto fattuale per il system prompt.
@@ -314,16 +352,18 @@ def _format_augmented_context(results: List[Dict[str, str]], query: str = "") ->
         url = r.get("url", "")
         lines.append(f"Fonte {i}: {title}")
         if snippet:
-            lines.append(f"  {snippet[:300]}")
+            lines.append(f"  {snippet[:500]}")
         if url:
             lines.append(f"  URL: {url}")
         lines.append("")
 
     lines.extend([
         "ISTRUZIONI:",
-        "- Usa i dati sopra per formulare una risposta accurata e naturale.",
-        "- Puoi citare le fonti con il NUMERO (es. 'Secondo la fonte 1...').",
-        "- NON inventare URL. Se vuoi riferire un link, usa SOLO quelli elencati sopra.",
+        "- Rispondi in modo COMPLETO e DETTAGLIATO usando i dati sopra.",
+        "- Struttura la risposta con paragrafi, elenchi puntati o sezioni Markdown.",
+        "- Integra le informazioni da pi\u00f9 fonti per dare una risposta ricca.",
+        "- NON citare le fonti per numero (l'utente non le vede).",
+        "- NON inventare URL. NON inserire link nella risposta.",
         "- Se i dati non bastano a rispondere completamente, dichiaralo.",
     ])
     return "\n".join(lines)
