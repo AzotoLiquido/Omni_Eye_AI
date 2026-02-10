@@ -538,9 +538,9 @@ class TestPromptBuilder(unittest.TestCase):
         builder = self._make_builder()
         tools = [{"id": "fs", "name": "Filesystem", "description": "Leggi file"}]
         prompt = builder.build_system_prompt(available_tools=tools)
-        self.assertIn("Strumenti disponibili", prompt)
+        self.assertIn("Capacità aggiuntive", prompt)
         self.assertIn("fs", prompt)
-        self.assertIn("Risposta Finale", prompt)
+        self.assertIn("Azione", prompt)
 
     def test_memory_section_fenced(self):
         builder = self._make_builder()

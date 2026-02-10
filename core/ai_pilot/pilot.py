@@ -107,7 +107,22 @@ class Pilot:
         self._auto_fact_count = 0
 
         memory_context = self.memory.retrieve(user_message) if user_message else ""
-        available_tools = self.tools.get_available_tools()
+
+        # Skip tools for simple conversational messages (greetings, short chat)
+        # to keep the prompt small and prevent the model from rambling about tools
+        stripped = user_message.strip().lower()
+        _is_simple = (
+            len(stripped) < 30 and
+            not any(kw in stripped for kw in (
+                "file", "leggi", "scrivi", "esegui", "codice", "script",
+                "database", "query", "cerca", "run", "execute", "read",
+                "write", "create", "crea", "apri", "open", "analizza",
+            ))
+        )
+        if _is_simple:
+            available_tools = None
+        else:
+            available_tools = self.tools.get_available_tools()
 
         system_prompt = self.prompt_builder.build_system_prompt(
             memory_context=memory_context,
