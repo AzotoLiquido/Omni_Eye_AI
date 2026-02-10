@@ -184,7 +184,7 @@ def api_chat():
     
     # Genera risposta
     try:
-        if PILOT_ENABLED and pilot:
+        if PILOT_ENABLED and pilot and not web_context:
             response, meta = pilot.process(
                 user_message,
                 conversation_history=history,
@@ -437,8 +437,10 @@ def api_chat_stream():
                         full_response += chunk
                         yield _sse_data(chunk)
 
-            elif PILOT_ENABLED and pilot:
+            elif PILOT_ENABLED and pilot and not web_context:
                 # Streaming via Pilot (con eventuale pianificazione ReAct)
+                # Se web_context è presente, bypassa il Pilot: i risultati di
+                # ricerca sono già nel system prompt, il planner li ignorerebbe.
                 for chunk in pilot.process_stream(
                     user_message,
                     conversation_history=clean_history,
