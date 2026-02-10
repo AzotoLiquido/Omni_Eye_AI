@@ -12,32 +12,41 @@ from .config_loader import PilotConfig
 
 _TONE_INSTRUCTIONS = {
     "terminal": (
-        "Rispondi in stile terminale: conciso, diretto, tecnico. "
-        "Usa il prefisso configurato per ogni blocco di output. "
-        "Niente fronzoli, niente emoji, solo dati."
+        "Stile terminale: conciso, tecnico, zero fronzoli. "
+        "Rispondi come un sistema che restituisce output: dati puliti, "
+        "senza preamboli né convenevoli. Niente emoji. "
+        "Usa il prefisso configurato per ogni blocco."
     ),
     "neutro": (
-        "Rispondi in modo neutro e professionale. "
-        "Mantieni un tono oggettivo e informativo."
+        "Tono professionale e oggettivo. "
+        "Esponi i fatti in modo chiaro e strutturato. "
+        "Niente opinioni non richieste, niente enfasi retorica."
     ),
     "amichevole": (
-        "Rispondi in modo cordiale e accessibile. "
-        "Usa un linguaggio semplice senza essere banale."
+        "Tono cordiale e naturale, come un collega competente. "
+        "Spiega con chiarezza, usa esempi pratici. "
+        "Evita formalità eccessive ma resta preciso."
     ),
     "formale": (
-        "Rispondi in modo formale e accademico. "
-        "Usa un linguaggio ricercato e strutturato."
+        "Tono formale e curato. Struttura accademica: "
+        "premessa, argomentazione, conclusione. "
+        "Linguaggio ricercato ma comprensibile."
+    ),
+    "friendly": (
+        "Tono cordiale e naturale, come un collega competente. "
+        "Spiega con chiarezza, usa esempi pratici. "
+        "Evita formalità eccessive ma resta preciso."
     ),
 }
 
 _VERBOSITY_MAP = {
-    0: "Risposte minime: solo il dato richiesto, niente altro.",
-    1: "Risposte estremamente brevi: una o due frasi al massimo.",
-    2: "Risposte brevi e concise: poche frasi mirate.",
-    3: "Risposte moderate: brevi paragrafi con i punti chiave.",
-    5: "Risposte bilanciate: spiegazioni chiare con esempi quando utile.",
-    7: "Risposte dettagliate: approfondimenti, esempi, alternative.",
-    10: "Risposte esaustive: copri ogni aspetto, con esempi completi.",
+    0: "ULTRA-BREVE: solo il dato richiesto, nessuna spiegazione.",
+    1: "Una frase secca di risposta. Nessun contesto aggiuntivo.",
+    2: "2-3 frasi al massimo. Vai dritto al punto.",
+    3: "Paragrafo breve con i punti chiave. Niente divagazioni.",
+    5: "Risposta bilanciata: spiegazione chiara + esempio se utile. Max 2 paragrafi.",
+    7: "Risposta approfondita: contesto, spiegazione, esempi, alternative.",
+    10: "Risposta esaustiva: copri ogni aspetto rilevante con esempi completi e dettagliati.",
 }
 
 
@@ -112,13 +121,20 @@ class PromptBuilder:
 
     def _section_identity(self) -> str:
         desc = self.cfg.raw["meta"].get("description", "")
+        custom = self.cfg.custom_instructions
         lines = [
-            f"[IDENTITÀ]",
-            f"Nome: {self.cfg.name}",
-            f"Versione: {self.cfg.version}",
+            f"# Identità",
+            f"Sei **{self.cfg.name}** v{self.cfg.version}, un assistente AI locale.",
         ]
         if desc:
-            lines.append(f"Descrizione: {desc}")
+            lines.append(f"{desc}")
+        if custom:
+            lines.append(f"{custom}")
+        lines.append(
+            "\nOperi sul dispositivo dell'utente, nessun dato esce dalla macchina. "
+            "Rispondi in modo accurato, utile e trasparente. "
+            "Se non sei sicuro di qualcosa, dichiaralo esplicitamente."
+        )
         return "\n".join(lines)
 
     def _section_style(self) -> str:
@@ -126,68 +142,84 @@ class PromptBuilder:
         verb_instr = _nearest_verbosity(self.cfg.verbosity)
 
         lines = [
-            "[STILE]",
-            f"Tono: {tone_instr}",
-            f"Verbosità: {verb_instr}",
+            "# Stile di risposta",
+            f"{tone_instr}",
+            f"Lunghezza: {verb_instr}",
+            "",
+            "Regole di formattazione:",
         ]
         fmt = self.cfg.formatting
         if fmt.get("use_lists"):
-            lines.append("- Usa elenchi puntati quando elenchi informazioni.")
+            lines.append("- Usa elenchi puntati per informazioni multiple.")
         if fmt.get("use_tables"):
-            lines.append("- Usa tabelle per dati strutturati.")
+            lines.append("- Usa tabelle Markdown per dati strutturati e confronti.")
         if fmt.get("code_fences"):
-            lines.append("- Racchiudi il codice in blocchi ``` con il linguaggio indicato.")
+            lines.append("- Codice sempre in code fence con linguaggio specificato (```python, ```js...).")
+        lines.append("- NON iniziare MAI con convenevoli (\"Certo!\", \"Ottima domanda!\"). Vai dritto alla risposta.")
+        lines.append("- Per risposte complesse: struttura con titoli Markdown (##, ###).")
 
         return "\n".join(lines)
 
     def _section_language(self) -> str:
         lines = [
-            "[LINGUA]",
+            "# Lingua",
             f"Lingua principale: {self.cfg.primary_language}",
-            "Rispondi SEMPRE nella lingua principale."
+            "Rispondi SEMPRE nella lingua principale dell'utente.",
+            "Adatta il registro al contesto: tecnico, colloquiale, o formale.",
         ]
         if self.cfg.avoid_english:
             lines.append(
-                "Evita termini inglesi se esiste un equivalente nella lingua principale."
+                "Evita anglicismi quando esiste un equivalente diffuso nella lingua principale."
             )
             glossary = self.cfg.glossary
             if glossary:
-                lines.append("Glossario sostitutivo:")
+                lines.append("Glossario:")
                 for eng, ita in glossary.items():
-                    lines.append(f"  '{eng}' → '{ita}'")
+                    lines.append(f"  {eng} → {ita}")
         return "\n".join(lines)
 
     def _section_safety(self) -> str:
         cats = self.cfg.refuse_categories
         lines = [
-            "[SICUREZZA]",
-            f"Rifiuta richieste relative a: {', '.join(cats)}.",
+            "# Sicurezza e vincoli",
+            "RIFIUTA categoricamente richieste relative a: " + ", ".join(cats) + ".",
+            "Se una richiesta è ambigua, interpreta nel modo più sicuro.",
         ]
         if self.cfg.redact_secrets:
             lines.append(
-                "Non mostrare mai credenziali, chiavi API, password o token nei tuoi output."
+                "NON mostrare mai credenziali, chiavi API, password o token nell'output."
             )
         if self.cfg.pii_handling == "strict_redaction":
-            lines.append("Oscura qualsiasi dato personale identificabile (PII) negli output.")
+            lines.append("OSCURA qualsiasi dato personale identificabile (PII).")
         elif self.cfg.pii_handling == "minimize":
-            lines.append("Minimizza l'uso di dati personali nelle risposte.")
+            lines.append("Minimizza l'uso di dati personali: citali solo se strettamente necessario.")
         return "\n".join(lines)
 
     def _section_tools(self, tools: List[Dict]) -> str:
         """Istruzioni sul formato ReAct per l'uso dei tool"""
         lines = [
-            "[STRUMENTI DISPONIBILI]",
-            "Puoi usare questi strumenti per rispondere. "
-            "Per invocare uno strumento, utilizza ESATTAMENTE questo formato:",
+            "# Strumenti disponibili",
             "",
-            "Pensiero: <ragionamento su cosa fare>",
-            "Azione: <nome_tool>(<parametri JSON>)",
-            "---",
+            "Puoi usare strumenti per completare le richieste. "
+            "Segui ESATTAMENTE questo formato ReAct:",
             "",
-            "Dopo aver ricevuto il risultato (Osservazione), "
-            "puoi fare un'altra Azione oppure dare la Risposta Finale.",
+            "```",
+            "Pensiero: [ragionamento conciso su cosa fare e quale strumento usare]",
+            "Azione: nome_tool({\"param\": \"valore\"})",
+            "```",
             "",
-            "Rispondi con 'Risposta Finale: <testo>' quando hai abbastanza informazioni.",
+            "Dopo ogni Azione riceverai un'Osservazione con il risultato.",
+            "Puoi eseguire più azioni in sequenza se necessario.",
+            "",
+            "Quando hai tutte le informazioni, concludi con:",
+            "```",
+            "Risposta Finale: [risposta completa all'utente]",
+            "```",
+            "",
+            "REGOLE:",
+            "- Usa uno strumento SOLO se la richiesta lo richiede effettivamente.",
+            "- Per domande di conoscenza generale, rispondi direttamente senza strumenti.",
+            "- Non inventare output di strumenti: attendi sempre l'Osservazione reale.",
             "",
             "Strumenti:",
         ]
@@ -195,14 +227,18 @@ class PromptBuilder:
             tid = t["id"]
             name = t.get("name", tid)
             desc = t.get("description", "")
-            lines.append(f"  - {tid} ({name}): {desc}")
+            caps = t.get("capabilities", [])
+            cap_str = f" [{', '.join(caps)}]" if caps else ""
+            lines.append(f"  - **{tid}** ({name}){cap_str}: {desc}")
 
         return "\n".join(lines)
 
     def _section_memory(self, memory_context: str) -> str:
         return (
-            "[CONTESTO DALLA MEMORIA]\n"
-            "Informazioni rilevanti recuperate dalla memoria:\n"
+            "# Contesto dalla memoria\n"
+            "Informazioni rilevanti recuperate dalla tua memoria persistente.\n"
+            "Usa queste informazioni per personalizzare e contestualizzare la risposta.\n"
+            "NON ripetere questi dati all'utente a meno che non li chieda esplicitamente.\n\n"
             f"{memory_context}"
         )
 
@@ -210,8 +246,9 @@ class PromptBuilder:
         fmt = self.cfg.output_format
         prefix = self.cfg.terminal_prefix
         lines = [
-            "[FORMATO OUTPUT]",
-            f"Formato predefinito: {fmt}",
+            "# Formato output",
+            f"Formato predefinito: **{fmt}**",
+            "Struttura le risposte in modo che siano facilmente leggibili.",
         ]
         if self.cfg.tone == "terminal" and prefix:
             lines.append(f"Prefisso output: '{prefix}'")
@@ -222,31 +259,43 @@ class PromptBuilder:
     # ------------------------------------------------------------------
 
     def build_summarization_prompt(self, text: str) -> str:
-        """Prompt per riassumere testo (contesto conversazione)"""
+        """Prompt per riassumere testo (compressione contesto conversazione)"""
         return (
-            "Riassumi il seguente testo in modo conciso ma completo. "
-            "Mantieni fatti, nomi, date e informazioni chiave. "
-            "Scrivi solo il riassunto:\n\n"
-            f"{text}"
+            "Compito: riassumi il testo seguente mantenendo TUTTE le informazioni fattuali.\n\n"
+            "Regole:\n"
+            "- Preserva: nomi, date, numeri, decisioni, fatti specifici\n"
+            "- Elimina: ripetizioni, convenevoli, digressioni\n"
+            "- Formato: prosa continua, max 1/3 della lunghezza originale\n"
+            "- NON aggiungere interpretazioni o commenti\n\n"
+            f"Testo da riassumere:\n---\n{text}\n---\n\n"
+            "Riassunto:"
         )
 
     def build_entity_extraction_prompt(self, message: str) -> str:
         """Prompt per estrarre entità/fatti da un messaggio utente"""
         return (
-            "Analizza questo messaggio ed estrai fatti memorizzabili. "
-            "Restituisci SOLO un JSON con questa struttura (niente altro testo):\n"
-            '{"facts": [{"key": "breve_etichetta", "value": "informazione"}]}\n'
-            "Se non ci sono fatti nuovi, restituisci: {\"facts\": []}\n\n"
-            f"Messaggio: {message}"
+            "Compito: estrai fatti memorizzabili dal messaggio seguente.\n\n"
+            "Regole:\n"
+            "- Estrai SOLO informazioni concrete e specifiche sull'utente o sul contesto\n"
+            "- Ignora domande, opinioni generiche, saluti\n"
+            "- Ogni fatto deve avere una chiave breve e descrittiva\n\n"
+            "Formato di output (SOLO JSON, nient'altro):\n"
+            '{"facts": [{"key": "nome_utente", "value": "Marco"}]}\n\n'
+            "Se non ci sono fatti nuovi:\n"
+            '{"facts": []}\n\n'
+            f"Messaggio:\n\"{message}\""
         )
 
     def build_tool_decision_prompt(self, user_message: str, tools: List[Dict]) -> str:
         """Prompt per decidere se usare tool per una richiesta"""
-        tool_names = [t["id"] for t in tools]
+        tool_list = "\n".join(f"  - {t['id']}: {t.get('description', '')}" for t in tools)
         return (
-            f"L'utente chiede: \"{user_message}\"\n\n"
-            f"Strumenti disponibili: {', '.join(tool_names)}\n\n"
-            "Questa richiesta necessita di uno strumento? "
-            "Rispondi SOLO 'SI' o 'NO' e il nome dello strumento se SI.\n"
-            "Formato: SI:nome_tool oppure NO"
+            f"Richiesta utente: \"{user_message}\"\n\n"
+            f"Strumenti disponibili:\n{tool_list}\n\n"
+            "Questa richiesta necessita di uno strumento per essere completata?\n"
+            "Rispondi in ESATTAMENTE uno di questi formati:\n"
+            "  SI:nome_tool\n"
+            "  NO\n\n"
+            "Criteri: usa uno strumento SOLO se la richiesta richiede accesso a file, "
+            "esecuzione di codice, o query al database. Per domande di conoscenza, rispondi NO."
         )

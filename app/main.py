@@ -445,10 +445,16 @@ def api_chat_stream():
                         vision_prompt,
                         conversation_history=clean_history[-4:],  # ultimi 2 turni per contesto
                         system_prompt=(
-                            "Sei un assistente visivo esperto. Analizza le immagini "
-                            "con precisione e rispondi nella lingua dell'utente. "
-                            "Sii dettagliato su testo visibile (OCR), colori, layout, "
-                            "persone, oggetti e contesto."
+                            "# Ruolo\n"
+                            "Sei un analista visivo esperto. Il tuo compito \u00e8 analizzare immagini "
+                            "con la massima precisione possibile.\n\n"
+                            "# Istruzioni\n"
+                            "1. Descrivi ESATTAMENTE ci\u00f2 che vedi, senza inventare dettagli.\n"
+                            "2. Se c'\u00e8 testo visibile, trascrivilo fedelmente.\n"
+                            "3. Specifica posizioni spaziali (in alto, a sinistra, sullo sfondo...).\n"
+                            "4. Distingui ci\u00f2 che \u00e8 certo da ci\u00f2 che \u00e8 incerto (\"sembra\", \"potrebbe\").\n"
+                            "5. Rispondi nella lingua dell'utente.\n"
+                            "6. NON aggiungere informazioni che non derivano dall'immagine."
                         ),
                         images=images,
                     ):
@@ -503,12 +509,18 @@ def api_chat_stream():
                     ai_engine.model = text_model
 
                     answer_prompt = (
-                        f"Ho analizzato un'immagine e ottenuto questa descrizione dettagliata:\n\n"
+                        f"# Contesto\n"
+                        f"L'utente ha inviato un'immagine. Un modello visivo l'ha analizzata "
+                        f"e ha prodotto questa descrizione:\n\n"
                         f"---\n{image_description.strip()}\n---\n\n"
-                        f"Domanda dell'utente sull'immagine: \"{user_message}\"\n\n"
-                        f"Rispondi in modo dettagliato e preciso, basandoti SOLO sulla "
-                        f"descrizione dell'immagine. Non inventare dettagli che non sono "
-                        f"nella descrizione. Rispondi nella stessa lingua della domanda."
+                        f"# Domanda dell'utente\n\"{user_message}\"\n\n"
+                        f"# Istruzioni\n"
+                        f"1. Rispondi basandoti ESCLUSIVAMENTE sulla descrizione fornita.\n"
+                        f"2. NON inventare dettagli assenti dalla descrizione.\n"
+                        f"3. Se la descrizione non contiene informazioni sufficienti per "
+                        f"rispondere, dichiaralo esplicitamente.\n"
+                        f"4. Rispondi nella stessa lingua della domanda dell'utente.\n"
+                        f"5. Sii preciso e strutturato nella risposta."
                     )
                     for chunk in ai_engine.generate_response_stream(
                         answer_prompt,
