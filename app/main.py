@@ -179,19 +179,22 @@ def api_chat():
         })
     
     # System prompt: Pilot (se attivo) oppure fallback config.py
+    # P2-1 fix: non costruire il prompt del Pilot qui — lo fa internamente
+    # process(). Passiamo web context + additional_context come extra_instructions.
     if PILOT_ENABLED and pilot:
-        system_prompt = pilot.build_system_prompt(
-            user_message=user_message,
-            extra_instructions=additional_context,
-        )
+        pilot_extra = ""
+        if web_search_data_sync and web_search_data_sync["mode"] == "augmented":
+            pilot_extra = web_search_data_sync["context"] + "\n\n"
+        if additional_context:
+            pilot_extra += additional_context
+        system_prompt = None  # Pilot costruisce il suo internamente
     else:
         system_prompt = config.SYSTEM_PROMPT
         if additional_context:
             system_prompt = additional_context + "\n" + system_prompt
-
-    # Modalità "augmented": inietta contesto web nel system prompt
-    if web_search_data_sync and web_search_data_sync["mode"] == "augmented":
-        system_prompt = web_search_data_sync["context"] + "\n\n" + system_prompt
+        # Modalità "augmented": inietta contesto web nel system prompt
+        if web_search_data_sync and web_search_data_sync["mode"] == "augmented":
+            system_prompt = web_search_data_sync["context"] + "\n\n" + system_prompt
     
     # Genera risposta
     try:
@@ -201,6 +204,7 @@ def api_chat():
                 conversation_history=history,
                 ai_engine=ai_engine,
                 conv_id=conv_id,
+                extra_instructions=pilot_extra if PILOT_ENABLED and pilot else "",
             )
         else:
             response = ai_engine.generate_response(
@@ -314,16 +318,16 @@ def api_chat_stream():
     web_search_data = search_and_format(user_message) if not images else None
     web_mode = web_search_data["mode"] if web_search_data else None
     
-    # System prompt: Pilot (se attivo) oppure fallback
-    # Bypassa Pilot se c'è ricerca web (sia links che augmented)
+    # System prompt + extra per Pilot
+    # P2-1 fix: non costruire il prompt del Pilot qui (lo fa process_stream).
+    # Passiamo image_memory + additional_context come extra_instructions.
     if PILOT_ENABLED and pilot and not web_search_data:
-        extra = additional_context
+        pilot_extra_stream = ""
         if image_memory:
-            extra = image_memory + "\n" + (extra or "")
-        system_prompt = pilot.build_system_prompt(
-            user_message=user_message,
-            extra_instructions=extra,
-        )
+            pilot_extra_stream = image_memory + "\n"
+        if additional_context:
+            pilot_extra_stream += additional_context
+        system_prompt = None  # Pilot costruisce il suo internamente
     else:
         system_prompt = config.SYSTEM_PROMPT
         if image_memory:
@@ -488,6 +492,7 @@ def api_chat_stream():
                     ai_engine=ai_engine,
                     conv_id=conv_id,
                     images=images,
+                    extra_instructions=pilot_extra_stream if PILOT_ENABLED and pilot else "",
                 ):
                     full_response += chunk
                     yield _sse_data(chunk)

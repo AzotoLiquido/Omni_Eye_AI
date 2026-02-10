@@ -245,33 +245,48 @@ class ReActPlanner:
     def _fallback_action_parse(self, output: str) -> Tuple[Optional[str], Dict]:
         """
         Parsing fallback per modelli che non seguono il formato esatto.
-        Cerca pattern come: "uso lo strumento fs per leggere..."
+        Cerca pattern espliciti come: "uso lo strumento fs per leggere..."
+
+        P1-2 fix: pattern più restrittivi per evitare falsi positivi
+        (es. "ricordo" in italiano non deve triggerare lo strumento db).
+        Per db e py richiediamo un parametro tra virgolette; per fs il
+        default "list ." è innocuo e resta consentito.
         """
         output_lower = output.lower()
 
-        # Pattern: "uso/utilizzo <tool>" o "cerco in memoria"
+        # Pattern: richieste esplicite di uso tool (più specifici)
         tool_patterns = {
-            "fs":   [
-                r"legg[io].*file", r"apri.*file", r"list[ao].*director", r"list[ao].*cartell",
-                r"read.*file", r"open.*file", r"list.*director",
+            "fs": [
+                r"legg[io]\s+(?:il\s+)?file",
+                r"apri\s+(?:il\s+)?file",
+                r"list[ao]\s+(?:la\s+)?director",
+                r"list[ao]\s+(?:la\s+)?cartell",
+                r"read\s+(?:the\s+)?file",
+                r"open\s+(?:the\s+)?file",
+                r"list\s+(?:the\s+)?director",
             ],
-            "py":   [
-                r"esegu[io].*codice", r"esegu[io].*python", r"calcol[ao]",
-                r"run.*code", r"execute.*python", r"calculat",
+            "py": [
+                r"esegu[io]\s+(?:il\s+)?codice",
+                r"esegu[io]\s+(?:in\s+)?python",
+                r"run\s+(?:the\s+)?code",
+                r"execute\s+(?:the\s+)?python",
             ],
-            "db":   [
-                r"cerc[ao].*memori", r"ricord[ao]", r"fatt[io].*not[io]",
-                r"search.*memor", r"remember", r"find.*fact",
+            "db": [
+                r"cerc[ao]\s+(?:nella?\s+)?memori",
+                r"(?:nella|in)\s+memori",
+                r"fatt[io]\s+not[ao]",
+                r"search\s+(?:the\s+)?memor",
+                r"find\s+(?:the\s+)?fact",
             ],
         }
+
+        # Cerca parametri tra virgolette nell'output (necessari per db/py)
+        quoted = re.findall(r'["\']([^"\']+)["\']', output)
 
         for tool_id, patterns in tool_patterns.items():
             for pat in patterns:
                 match = re.search(pat, output_lower)
                 if match:
-                    # Prova a estrarre un parametro dal contesto
-                    # Cerca testo tra virgolette
-                    quoted = re.findall(r'["\']([^"\']+)["\']', output)
                     if quoted:
                         if tool_id == "fs":
                             return tool_id, {"action": "read", "path": quoted[0]}
@@ -279,15 +294,12 @@ class ReActPlanner:
                             return tool_id, {"action": "search", "query": quoted[0]}
                         elif tool_id == "py":
                             return tool_id, {"code": quoted[0]}
-                    # Nessun parametro trovato - provide sensible defaults
+
+                    # Nessun parametro tra virgolette: solo fs ha un default sicuro
                     if tool_id == "fs":
                         return tool_id, {"action": "list", "path": "."}
-                    elif tool_id == "db":
-                        # Extract a search hint from the output itself
-                        words = [w for w in output.split() if len(w) > 3]
-                        hint = " ".join(words[:5]) if words else "ricerca"
-                        return tool_id, {"action": "search", "query": hint}
-                    return tool_id, {}
+                    # db e py senza parametro esplicito → non triggerare (P1-2)
+                    continue
 
         return None, {}
 

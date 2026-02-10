@@ -1,4 +1,4 @@
-{
+﻿{
   "$schema": "./assistant.schema.json",
   "meta": {
     "name": "Omni Eye AI",
@@ -8,7 +8,7 @@
   },
   "runtime": {
     "engine": "ollama",
-    "model_id": "llama3",
+    "model_id": "dolphin-llama3:latest",
     "temperature": 0.7,
     "max_tokens": 2048,
     "context_window": 4096,

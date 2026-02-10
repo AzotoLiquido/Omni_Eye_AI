@@ -66,6 +66,7 @@ class Pilot:
         self,
         user_message: str,
         conv_id: str,
+        extra_instructions: str = "",
     ) -> Tuple[str, List, bool]:
         """
         Logica condivisa per process() e process_stream():
@@ -85,6 +86,7 @@ class Pilot:
         system_prompt = self.prompt_builder.build_system_prompt(
             memory_context=memory_context,
             available_tools=available_tools or None,
+            extra_instructions=extra_instructions,
         )
 
         use_planning = (
@@ -129,6 +131,7 @@ class Pilot:
         conversation_history: List[Dict] = None,
         ai_engine=None,
         conv_id: str = "",
+        extra_instructions: str = "",
     ) -> Tuple[str, Dict]:
         """
         Processa un messaggio con il ciclo completo del Pilot.
@@ -138,6 +141,7 @@ class Pilot:
             conversation_history: Storico conversazione (formato Ollama)
             ai_engine:           Istanza di AIEngine per generare risposte
             conv_id:             ID conversazione per logging
+            extra_instructions:  Istruzioni extra da aggiungere al system prompt
 
         Returns:
             (risposta_finale, metadata)
@@ -146,7 +150,7 @@ class Pilot:
             raise ValueError("ai_engine è richiesto per process()")
 
         system_prompt, available_tools, use_planning = self._prepare_turn(
-            user_message, conv_id
+            user_message, conv_id, extra_instructions
         )
 
         metadata = {
@@ -192,11 +196,12 @@ class Pilot:
         ai_engine=None,
         conv_id: str = "",
         images: List[str] = None,
+        extra_instructions: str = "",
     ) -> Generator[str, None, None]:
         """
         Processa un messaggio con streaming.
-        Per richieste che richiedono tool, esegue il piano prima
-        e poi genera lo streaming della risposta finale.
+        Per richieste ReAct, streamma aggiornamenti di stato intermedi
+        prima della risposta finale (P1-4).
 
         Yields:
             Chunk della risposta
@@ -205,7 +210,7 @@ class Pilot:
             raise ValueError("ai_engine è richiesto per process_stream()")
 
         system_prompt, available_tools, use_planning = self._prepare_turn(
-            user_message, conv_id
+            user_message, conv_id, extra_instructions
         )
 
         # P0-2 fix: usa _stream_inner + post-processing in finally/GeneratorExit
@@ -213,14 +218,16 @@ class Pilot:
         response = ""
         try:
             if use_planning and isinstance(self.planner, ReActPlanner):
-                # Esegui il piano in modo sincrono, poi streamma il risultato finale
-                response, _ = self._run_react_loop(
+                # P1-4: streamma aggiornamenti intermedi del ciclo ReAct
+                for msg_type, content in self._run_react_loop_streaming(
                     user_message, conversation_history, system_prompt, ai_engine
-                )
-                response = self._post_process(response)
-
-                for chunk in self._simulate_stream(response):
-                    yield chunk
+                ):
+                    if msg_type == "status":
+                        yield content
+                    elif msg_type == "answer":
+                        response = self._post_process(content)
+                        for chunk in self._simulate_stream(response):
+                            yield chunk
             else:
                 # Streaming diretto dal modello
                 full_response = ""
@@ -330,8 +337,21 @@ class Pilot:
                 new_context = self.planner.build_continuation_prompt(step)
                 accumulated_context += "\n" + new_context
                 # P2: Trim accumulated context to prevent unbounded growth
+                # P1-3 fix: mantieni il primo step + ultimi step invece di
+                # tagliare dall'inizio (perdeva il contesto iniziale)
                 if len(accumulated_context) > _MAX_CONTEXT_CHARS:
-                    accumulated_context = accumulated_context[-_MAX_CONTEXT_CHARS:]
+                    # Trova la fine del primo blocco di contesto (primo \n\n)
+                    first_break = accumulated_context.find("\n\n", 200)
+                    if first_break == -1 or first_break > _MAX_CONTEXT_CHARS // 3:
+                        first_break = _MAX_CONTEXT_CHARS // 4
+                    first_part = accumulated_context[:first_break]
+                    tail_budget = _MAX_CONTEXT_CHARS - len(first_part) - 30
+                    last_part = accumulated_context[-tail_budget:]
+                    accumulated_context = (
+                        first_part
+                        + "\n\n[...passi intermedi omessi...]\n\n"
+                        + last_part
+                    )
             else:
                 # Nessuna azione ma nemmeno risposta finale → forza uscita
                 return output.strip(), metadata
@@ -344,6 +364,96 @@ class Pilot:
 
         # Usa l'ultimo output come risposta
         return output.strip(), metadata
+
+    def _run_react_loop_streaming(
+        self,
+        user_message: str,
+        conversation_history: List[Dict],
+        system_prompt: str,
+        ai_engine,
+    ) -> Generator[Tuple[str, str], None, None]:
+        """
+        P1-4: versione generator del ciclo ReAct che yield aggiornamenti
+        intermedi per lo streaming, così l'utente non resta in attesa.
+
+        Yields:
+            ("status", testo_stato) — aggiornamento intermedio
+            ("answer", risposta_finale) — risposta da post-processare e streammare
+        """
+        self.planner.reset()
+        metadata = {"steps": [], "tools_called": []}
+
+        current_prompt = user_message
+        accumulated_context = ""
+        output = ""
+        max_tool_calls = self.cfg.max_tool_calls
+        _MAX_CONTEXT_CHARS = 8000
+        tools_called_count = 0
+
+        for i in range(self.cfg.planner_max_steps):
+            yield ("status", f"\n\n> 🔄 *Passo {i + 1}: ragionamento...*\n")
+
+            full_prompt = current_prompt
+            if accumulated_context:
+                full_prompt = f"{accumulated_context}\n\nOra rispondi alla richiesta originale."
+
+            output = ai_engine.generate_response(
+                full_prompt,
+                conversation_history=conversation_history,
+                system_prompt=system_prompt,
+            )
+
+            step = self.planner.parse_model_output(output)
+            self.logger.log_plan_step(step.to_dict())
+            metadata["steps"].append(step.to_dict())
+
+            if step.is_final:
+                yield ("answer", step.final_answer)
+                return
+
+            if step.action:
+                tools_called_count += 1
+                if tools_called_count > max_tool_calls:
+                    self.logger.log_event("max_tool_calls_exceeded", {
+                        "limit": max_tool_calls,
+                    }, level="warn")
+                    yield ("answer", output.strip())
+                    return
+
+                yield ("status", f"> ⚙️ *Strumento: {step.action}*\n")
+                observation, tool_success = self.planner.execute_step(step)
+                metadata["tools_called"].append(step.action)
+
+                status_icon = "✅" if tool_success else "❌"
+                yield ("status", f"> {status_icon} *Risultato ottenuto*\n")
+
+                self.logger.log_tool_call(
+                    step.action, step.action_params, tool_success, observation,
+                )
+
+                new_context = self.planner.build_continuation_prompt(step)
+                accumulated_context += "\n" + new_context
+                if len(accumulated_context) > _MAX_CONTEXT_CHARS:
+                    first_break = accumulated_context.find("\n\n", 200)
+                    if first_break == -1 or first_break > _MAX_CONTEXT_CHARS // 3:
+                        first_break = _MAX_CONTEXT_CHARS // 4
+                    first_part = accumulated_context[:first_break]
+                    tail_budget = _MAX_CONTEXT_CHARS - len(first_part) - 30
+                    last_part = accumulated_context[-tail_budget:]
+                    accumulated_context = (
+                        first_part
+                        + "\n\n[...passi intermedi omessi...]\n\n"
+                        + last_part
+                    )
+            else:
+                yield ("answer", output.strip())
+                return
+
+        self.logger.log_event("react_max_steps", {
+            "steps": len(metadata["steps"]),
+            "max": self.cfg.planner_max_steps,
+        }, level="warn")
+        yield ("answer", output.strip())
 
     # ==================================================================
     # POST-PROCESSING
@@ -480,14 +590,27 @@ class Pilot:
     # ==================================================================
 
     def _simulate_stream(self, text: str, chunk_size: int = 4) -> Generator[str, None, None]:
-        """Simula streaming spezzando il testo in piccoli chunk.
-        P3: Preserve original whitespace (newlines, spaces) instead of splitting on space.
+        """Simula streaming spezzando il testo in chunk che rispettano
+        i confini delle parole (P2-5 fix: non taglia più a metà parola).
         """
-        # Use character-level chunking to preserve all whitespace
-        for i in range(0, len(text), chunk_size * 5):
-            chunk = text[i:i + chunk_size * 5]
+        target = chunk_size * 5  # ~20 chars per chunk
+        i = 0
+        while i < len(text):
+            end = min(i + target, len(text))
+            # Se non siamo alla fine, evita di tagliare a metà parola
+            if end < len(text) and text[end] not in (" ", "\n", "\t", "\r"):
+                # Cerca il prossimo spazio/newline entro un margine ragionevole
+                next_space = text.find(" ", end)
+                next_nl = text.find("\n", end)
+                candidates = [c for c in (next_space, next_nl) if c != -1 and c <= end + target]
+                if candidates:
+                    end = min(candidates) + 1
+                else:
+                    end = len(text)
+            chunk = text[i:end]
             if chunk:
                 yield chunk
+            i = end
 
     def get_status(self) -> Dict:
         """Stato completo del Pilot"""

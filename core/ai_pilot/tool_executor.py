@@ -215,8 +215,9 @@ class ToolExecutor:
         max_output = tool_cfg.get("parameters", {}).get("max_output_chars", 10000)
 
         try:
-            # P2: Use system Python instead of venv executable for sandbox isolation
-            python_exe = shlex.split("python")[0] if os.name == "nt" else "python3"
+            # P1-5 fix: usa sys.executable (garantito valido) invece di
+            # risoluzione PATH-dependent che può fallire o trovare il python sbagliato
+            python_exe = sys.executable
             result = subprocess.run(
                 [python_exe, "-I", "-c", code],  # -I = isolated mode
                 capture_output=True,

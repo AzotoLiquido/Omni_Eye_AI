@@ -10,7 +10,6 @@ import atexit
 import logging
 import shutil
 import threading
-from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -251,15 +250,39 @@ class AuditLogger:
         return self._read_tail(self._conversations_path, n)
 
     def _read_tail(self, path: Path, n: int) -> list:
-        """Legge le ultime N righe di un file JSONL in modo efficiente"""
+        """
+        Legge le ultime N righe di un file JSONL in modo efficiente.
+        P2-9 fix: cerca dalla fine del file (O(N) sulle ultime righe,
+        non O(N) sull'intero file come faceva la deque).
+        """
         if not path.exists():
             return []
 
         try:
-            # Usa deque con maxlen per leggere solo le ultime N righe
-            # senza tenere l'intero file in memoria
-            with open(path, "r", encoding="utf-8") as f:
-                last_lines = deque(f, maxlen=n)
+            with open(path, "rb") as f:
+                # Vai alla fine per ottenere la dimensione
+                f.seek(0, 2)
+                file_size = f.tell()
+                if file_size == 0:
+                    return []
+
+                # Leggi blocchi dalla fine finché non troviamo N+1 newline
+                lines_found = 0
+                block_size = 4096
+                blocks = []
+                remaining = file_size
+
+                while remaining > 0 and lines_found <= n:
+                    read_size = min(block_size, remaining)
+                    remaining -= read_size
+                    f.seek(remaining)
+                    block = f.read(read_size)
+                    blocks.append(block)
+                    lines_found += block.count(b"\n")
+
+                # Ricomponi in ordine corretto e decodifica
+                content = b"".join(reversed(blocks)).decode("utf-8", errors="replace")
+                last_lines = content.splitlines()[-n:]
 
             entries = []
             for line in last_lines:
