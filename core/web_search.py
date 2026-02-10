@@ -55,7 +55,8 @@ def is_youtube_query(message: str) -> bool:
 _FILLER_WORDS = re.compile(
     r"\b(?:trovami|cercami|cercamelo|dammi|mostrami|apri|aprimi|"
     r"trova|cerca|cerca(?:re)?|per favore|please|puoi|potresti|"
-    r"il link|un link|il video|della canzone|di|del|della|dello|"
+    r"il link|un link|il video|della canzone|canzone|brano|musica|song|music|"
+    r"di|del|della|dello|"
     r"su|mi|me|la|le|lo|gli|un|una|dei|delle|degli)\b",
     re.IGNORECASE,
 )
@@ -97,6 +98,11 @@ def web_search(
     except ImportError:
         logger.warning("ddgs non installato. Installa con: pip install ddgs")
         return []
+
+    # Per YouTube usare regione mondiale: evita che DuckDuckGo
+    # restituisca cover/traduzioni italiane invece dell'originale.
+    if youtube:
+        region = "wt-wt"
 
     search_query = query
     if youtube:
