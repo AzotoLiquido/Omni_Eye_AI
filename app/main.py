@@ -22,6 +22,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core import AIEngine, DocumentProcessor
 from core.advanced_memory import AdvancedMemory
 from core.ai_pilot import Pilot
+from app.vision import (
+    VISION_ONLY_TAGS, MULTILINGUAL_VISION, VISION_PRIORITY,
+    VISION_SYSTEM_PROMPT, user_visible_models, vision_model_priority,
+    build_vision_prompt,
+)
 import config
 
 # Regex per validazione ID conversazione (anti path-traversal)
@@ -108,149 +113,6 @@ def knowledge_page():
     return render_template('knowledge.html')
 
 
-# Modelli usati solo come backend per vision; nascosti dalla selezione utente
-_VISION_ONLY_TAGS = ('moondream', 'bakllava', 'minicpm-v')
-
-# Modelli vision multilingue: possono rispondere direttamente in qualsiasi lingua
-# → pipeline singola (no fase intermedia in inglese)
-_MULTILINGUAL_VISION = ('minicpm-v', 'llava:13b', 'llava-llama3')
-
-# Modelli vision EN-only: descrivono solo in inglese
-# → pipeline a 2 fasi (descrizione EN + risposta IT via modello testo)
-_EN_ONLY_VISION = ('moondream', 'bakllava', 'llava-phi3', 'llava:7b', 'llava')
-
-# Ordine di priorità modelli vision (il primo disponibile viene usato)
-_VISION_PRIORITY = ('minicpm-v', 'llava:13b', 'llava-llama3', 'llava:7b',
-                    'llava', 'moondream', 'bakllava', 'vision')
-
-def _user_visible_models() -> list:
-    """Restituisce solo i modelli selezionabili dall'utente (esclude vision-only)."""
-    return [m for m in ai_engine.list_available_models()
-            if not any(tag in m.lower() for tag in _VISION_ONLY_TAGS)]
-
-
-def _build_vision_prompt(user_message: str, multilingual: bool) -> str:
-    """Costruisce un prompt vision adattivo in base alla domanda dell'utente.
-
-    Analizza il contenuto della domanda per capire cosa l'utente vuole sapere
-    e genera un prompt specializzato (OCR, persone, scena, tecnico, ecc.).
-
-    Args:
-        user_message: La domanda dell'utente sull'immagine
-        multilingual: Se True, il prompt include istruzioni di lingua
-    """
-    msg = (user_message or "").lower()
-
-    # Rilevamento intento dalla domanda utente
-    ocr_keywords = ('testo', 'scritto', 'scritta', 'leggi', 'leggere', 'parole',
-                    'scrivi', 'text', 'read', 'ocr', 'lettere', 'titolo',
-                    'etichetta', 'label', 'caption', 'didascalia')
-    people_keywords = ('persona', 'persone', 'gente', 'viso', 'volto', 'faccia',
-                       'chi', 'uomo', 'donna', 'bambino', 'people', 'person',
-                       'face', 'who', 'espressione', 'emozione')
-    tech_keywords = ('codice', 'code', 'programma', 'errore', 'error', 'bug',
-                     'screenshot', 'schermo', 'screen', 'interfaccia', 'ui',
-                     'terminale', 'terminal', 'console', 'log')
-    food_keywords = ('cibo', 'piatto', 'mangiare', 'ricetta', 'ingredienti',
-                     'food', 'dish', 'recipe', 'cucina')
-    location_keywords = ('dove', 'luogo', 'posto', 'citt', 'paese', 'location',
-                         'where', 'edificio', 'building', 'strada', 'via')
-
-    has_ocr = any(k in msg for k in ocr_keywords)
-    has_people = any(k in msg for k in people_keywords)
-    has_tech = any(k in msg for k in tech_keywords)
-    has_food = any(k in msg for k in food_keywords)
-    has_location = any(k in msg for k in location_keywords)
-
-    # Costruisci prompt specializzato
-    parts = []
-
-    if multilingual:
-        # Per modelli multilingue: rispondi direttamente alla domanda dell'utente
-        if has_ocr:
-            parts.append(
-                "Analizza attentamente l'immagine e trascrivi TUTTO il testo visibile, "
-                "inclusi titoli, etichette, didascalie e qualsiasi scritta. "
-                "Mantieni la formattazione originale dove possibile."
-            )
-        elif has_tech:
-            parts.append(
-                "Analizza questo screenshot/interfaccia tecnica. "
-                "Identifica il tipo di applicazione, il linguaggio di programmazione se presente, "
-                "eventuali errori visibili, e descrivi i dettagli tecnici rilevanti."
-            )
-        elif has_people:
-            parts.append(
-                "Descrivi le persone presenti nell'immagine: quante sono, "
-                "il loro aspetto generale, espressioni, posizioni, "
-                "abbigliamento e cosa stanno facendo."
-            )
-        elif has_food:
-            parts.append(
-                "Analizza il cibo/piatto nell'immagine. Identifica gli ingredienti visibili, "
-                "il tipo di piatto, la presentazione e il contesto."
-            )
-        elif has_location:
-            parts.append(
-                "Descrivi il luogo mostrato nell'immagine: tipo di ambiente, "
-                "elementi architettonici, segnali o indicazioni di localizzazione, "
-                "atmosfera e dettagli rilevanti."
-            )
-        else:
-            parts.append(
-                "Descrivi tutto ciò che vedi nell'immagine nel modo più completo possibile."
-            )
-
-        if user_message and user_message.strip():
-            parts.append(f"\nDomanda specifica dell'utente: \"{user_message}\"")
-            parts.append("Rispondi nella stessa lingua della domanda.")
-        else:
-            parts.append("Rispondi in italiano.")
-
-    else:
-        # Per modelli EN-only: descrizione dettagliata in inglese
-        if has_ocr:
-            parts.append(
-                "Carefully examine this image and transcribe ALL visible text, "
-                "including titles, labels, captions, signs, and any writing. "
-                "Preserve the original formatting where possible."
-            )
-        elif has_tech:
-            parts.append(
-                "Analyze this screenshot or technical interface in detail. "
-                "Identify the application type, programming language if present, "
-                "any visible errors, UI elements, and technical details."
-            )
-        elif has_people:
-            parts.append(
-                "Describe the people in this image: how many, their general appearance, "
-                "expressions, positions, clothing, and what they are doing."
-            )
-        elif has_food:
-            parts.append(
-                "Analyze the food/dish in this image. Identify visible ingredients, "
-                "the type of dish, presentation style, and context."
-            )
-        elif has_location:
-            parts.append(
-                "Describe the location shown in this image: environment type, "
-                "architectural elements, signs or landmarks, atmosphere, and notable details."
-            )
-        else:
-            parts.append(
-                "Describe everything you see in this image in detail. "
-                "Include objects, colors, text, people, animals, spatial layout, "
-                "and any notable features."
-            )
-
-        # Aggiungi sempre focus su aspetti importanti per EN-only
-        parts.append(
-            "\nBe precise and thorough. If there is any text visible, transcribe it exactly."
-        )
-
-    return "\n".join(parts)
-
-
 @app.route('/api/status', methods=['GET'])
 def api_status():
     """Verifica lo stato del sistema"""
@@ -261,7 +123,7 @@ def api_status():
         'ollama_available': ollama_ok,
         'model_available': model_ok,
         'model_name': ai_engine.model,
-        'available_models': _user_visible_models() if ollama_ok else []
+        'available_models': user_visible_models(ai_engine) if ollama_ok else []
     })
 
 
@@ -451,18 +313,12 @@ def api_chat_stream():
             if images:
                 all_models = ai_engine.list_available_models()
                 vision_models = [m for m in all_models
-                                 if any(v in m.lower() for v in _VISION_PRIORITY)]
-                # Ordina per priorità definita in _VISION_PRIORITY
-                def _priority(name):
-                    low = name.lower()
-                    for i, tag in enumerate(_VISION_PRIORITY):
-                        if tag in low:
-                            return i
-                    return len(_VISION_PRIORITY)
-                vision_models.sort(key=_priority)
+                                 if any(v in m.lower() for v in VISION_PRIORITY)]
+                # Ordina per priorità definita in VISION_PRIORITY
+                vision_models.sort(key=vision_model_priority)
 
                 current = ai_engine.model.lower()
-                is_vision = any(v in current for v in _VISION_PRIORITY)
+                is_vision = any(v in current for v in VISION_PRIORITY)
 
                 if not is_vision and vision_models:
                     vision_model = vision_models[0]
@@ -476,25 +332,10 @@ def api_chat_stream():
 
                 text_model = config.AI_CONFIG['model']
                 is_multilingual = any(tag in vision_model.lower()
-                                      for tag in _MULTILINGUAL_VISION)
+                                      for tag in MULTILINGUAL_VISION)
 
                 # --- Prompt adattivo in base alla domanda utente ---
-                vision_prompt = _build_vision_prompt(user_message, is_multilingual)
-
-                # System prompt condiviso per analisi visiva
-                _VISION_SYSTEM_PROMPT = (
-                    "# Ruolo\n"
-                    "Sei un analista visivo esperto. Il tuo compito è analizzare immagini "
-                    "con la massima precisione possibile.\n\n"
-                    "# Istruzioni\n"
-                    "1. Descrivi ESATTAMENTE ciò che vedi, senza inventare dettagli.\n"
-                    "2. Se c\'è testo visibile, trascrivilo fedelmente.\n"
-                    "3. Specifica posizioni spaziali (in alto, a sinistra, sullo sfondo...).\n"
-                    "4. Distingui ciò che è certo da ciò che è incerto (\"sembra\", \"potrebbe\").\n"
-                    "5. Rispondi nella lingua dell\'utente.\n"
-                    "6. NON aggiungere informazioni che non derivano dall\'immagine.\n"
-                    "7. Sii conciso ma completo. Non ripetere le stesse informazioni."
-                )
+                vision_prompt = build_vision_prompt(user_message, is_multilingual)
 
                 if is_multilingual:
                     # ═══ PIPELINE SINGOLA — modello multilingue ═══
@@ -504,7 +345,7 @@ def api_chat_stream():
                     for chunk in ai_engine.generate_response_stream(
                         vision_prompt,
                         conversation_history=clean_history[-4:],
-                        system_prompt=_VISION_SYSTEM_PROMPT,
+                        system_prompt=VISION_SYSTEM_PROMPT,
                         images=images,
                         model=vision_model,
                         temperature=0.2,
@@ -535,7 +376,7 @@ def api_chat_stream():
                         vision_prompt,
                         conversation_history=None,
                         # P1-3: system prompt anche per EN-only
-                        system_prompt=_VISION_SYSTEM_PROMPT,
+                        system_prompt=VISION_SYSTEM_PROMPT,
                         images=images,
                         model=vision_model,
                         temperature=0.15,
@@ -738,6 +579,7 @@ def api_upload_document():
 
 
 @app.route('/api/analyze-document', methods=['POST'])
+@limiter.limit(config.RATE_LIMIT_CONFIG['limits']['default'])
 def api_analyze_document():
     """Analizza un documento con l'AI
     
@@ -775,6 +617,7 @@ def api_analyze_document():
 # ============================================================================
 
 @app.route('/api/conversation/<conv_id>/stats', methods=['GET'])
+@limiter.limit(config.RATE_LIMIT_CONFIG['limits']['default'])
 def api_conversation_stats(conv_id):
     """Ottiene statistiche dettagliate sulla conversazione
     
@@ -792,6 +635,7 @@ def api_conversation_stats(conv_id):
 
 
 @app.route('/api/knowledge/summary', methods=['GET'])
+@limiter.limit(config.RATE_LIMIT_CONFIG['limits']['default'])
 def api_knowledge_summary():
     """Esporta un riassunto della knowledge base"""
     summary = memory.export_knowledge_summary()
@@ -830,6 +674,7 @@ def api_knowledge_search():
 
 
 @app.route('/api/entities', methods=['GET'])
+@limiter.limit(config.RATE_LIMIT_CONFIG['limits']['default'])
 def api_get_entities():
     """Ottiene tutte le entità tracciate"""
     entities = memory.entity_tracker.entities
@@ -846,6 +691,7 @@ def api_get_entities():
 
 
 @app.route('/api/memory/optimize', methods=['POST'])
+@limiter.limit(config.RATE_LIMIT_CONFIG['limits']['default'])
 def api_optimize_memory():
     """Forza l'ottimizzazione della memoria per la conversazione corrente
     
@@ -878,9 +724,10 @@ def api_optimize_memory():
 
 
 @app.route('/api/models', methods=['GET'])
+@limiter.limit(config.RATE_LIMIT_CONFIG['limits']['default'])
 def api_list_models():
     """Lista i modelli disponibili (esclusi quelli vision-only di backend)."""
-    models = _user_visible_models()
+    models = user_visible_models(ai_engine)
     return jsonify({
         'models': models,
         'current': ai_engine.model
@@ -917,6 +764,7 @@ def api_change_model():
 # ============================================================================
 
 @app.route('/api/pilot/status', methods=['GET'])
+@limiter.limit(config.RATE_LIMIT_CONFIG['limits']['default'])
 def api_pilot_status():
     """Stato del sistema AI-Pilot"""
     if not PILOT_ENABLED or not pilot:
@@ -925,6 +773,7 @@ def api_pilot_status():
 
 
 @app.route('/api/pilot/memory', methods=['GET'])
+@limiter.limit(config.RATE_LIMIT_CONFIG['limits']['default'])
 def api_pilot_memory():
     """Statistiche e fatti dalla memoria Pilot"""
     if not PILOT_ENABLED or not pilot:
@@ -937,6 +786,7 @@ def api_pilot_memory():
 
 
 @app.route('/api/pilot/memory/search', methods=['POST'])
+@limiter.limit(config.RATE_LIMIT_CONFIG['limits']['default'])
 def api_pilot_memory_search():
     """Cerca nella memoria strutturata del Pilot"""
     if not PILOT_ENABLED or not pilot:
@@ -952,6 +802,7 @@ def api_pilot_memory_search():
 
 
 @app.route('/api/pilot/memory/fact', methods=['POST'])
+@limiter.limit(config.RATE_LIMIT_CONFIG['limits']['default'])
 def api_pilot_add_fact():
     """Aggiunge un fatto manuale alla memoria Pilot"""
     if not PILOT_ENABLED or not pilot:
@@ -968,6 +819,7 @@ def api_pilot_add_fact():
 
 
 @app.route('/api/pilot/task', methods=['POST'])
+@limiter.limit(config.RATE_LIMIT_CONFIG['limits']['default'])
 def api_pilot_add_task():
     """Crea un task nel Pilot"""
     if not PILOT_ENABLED or not pilot:
@@ -983,6 +835,7 @@ def api_pilot_add_task():
 
 
 @app.route('/api/pilot/reload', methods=['POST'])
+@limiter.limit(config.RATE_LIMIT_CONFIG['limits']['default'])
 def api_pilot_reload():
     """Ricarica la configurazione del Pilot da disco"""
     if not PILOT_ENABLED or not pilot:

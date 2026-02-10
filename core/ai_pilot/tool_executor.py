@@ -146,6 +146,10 @@ class ToolExecutor:
         else:
             return ToolResult(tool_id, False, "", f"Azione filesystem sconosciuta: {action}")
 
+    # Regex per metacaratteri shell pericolosi (class-level, compiled once)
+    # P2: Backslash (\) is a valid Windows path separator — don't block it
+    _SHELL_META = re.compile(r'[;&|`$(){}\[\]<>!]')
+
     # Moduli consentiti nella sandbox Python (allowlist)
     _ALLOWED_PY_MODULES = frozenset({
         "math", "random", "string", "json", "re", "datetime", "collections",
@@ -244,9 +248,7 @@ class ToolExecutor:
             return ToolResult(tool_id, False, "", "Nessun comando fornito")
 
         # Blocca metacaratteri shell pericolosi
-        # P2: Backslash (\) is a valid Windows path separator — don't block it
-        _SHELL_META = re.compile(r'[;&|`$(){}\[\]<>!]')
-        if _SHELL_META.search(command):
+        if self._SHELL_META.search(command):
             return ToolResult(tool_id, False, "",
                               "Comando contiene metacaratteri shell non consentiti")
 
@@ -347,7 +349,10 @@ class ToolExecutor:
         for entry in sorted(path.iterdir()):
             rel = entry.relative_to(self._fs_root)
             suffix = "/" if entry.is_dir() else ""
-            size = entry.stat().st_size if entry.is_file() else 0
+            try:
+                size = entry.stat().st_size if entry.is_file() else 0
+            except OSError:
+                size = 0
             entries.append(f"{rel}{suffix}  ({size} bytes)" if not suffix else f"{rel}{suffix}")
 
         output = "\n".join(entries) if entries else "(directory vuota)"

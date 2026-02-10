@@ -255,6 +255,9 @@ function moveOrbStep() {
 }
 
 function startGridOrb() {
+    // Respect prefers-reduced-motion at JS level (CSS may hide but timer still runs)
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
     // Attach orb to .chat-area (not messages-container) so it stays in visible viewport
     const chatArea = document.querySelector('.chat-area');
     if (!chatArea) {
@@ -459,8 +462,14 @@ async function handleModelChange(e) {
 // Gestione textarea e validazione input
 // ============================================================================
 
-// Gestione input
+// Debounce helper
+let _inputDebounceTimer = null;
 function handleInputChange() {
+    if (_inputDebounceTimer) clearTimeout(_inputDebounceTimer);
+    _inputDebounceTimer = setTimeout(_doHandleInputChange, 50);
+}
+
+function _doHandleInputChange() {
     const hasText = elements.messageInput.value.trim().length > 0;
     const hasImages = App.state.pendingImages.length > 0;
     elements.sendBtn.disabled = !(hasText || hasImages);
@@ -548,6 +557,8 @@ async function handleStreamResponse(response, contentDiv) {
                     scrollToBottom();
                 } else if (currentEvent === 'end') {
                     App.state.currentConversationId = data;
+                    // Render finale Markdown (dopo fine stream)
+                    contentDiv.innerHTML = renderMarkdown(fullResponse);
                 } else if (currentEvent === 'error') {
                     throw new Error(data);
                 }
@@ -636,7 +647,7 @@ Domanda utente: ${requestBody.message}`;
             throw new Error(errorMessage);
         }
         
-        // Step 7: Rimuovi typing indicator
+        // Rimuovi typing indicator
         removeTypingIndicator(typingId);
         
         // Step 8: Crea messaggio assistant vuoto
@@ -704,9 +715,17 @@ function createMessageElement(role, content, images = []) {
     }
     
     if (content) {
-        const textNode = document.createElement('span');
-        textNode.textContent = content;
-        contentDiv.appendChild(textNode);
+        if (role === 'assistant') {
+            // Render Markdown per messaggi AI
+            const mdDiv = document.createElement('div');
+            mdDiv.className = 'markdown-body';
+            mdDiv.innerHTML = renderMarkdown(content);
+            contentDiv.appendChild(mdDiv);
+        } else {
+            const textNode = document.createElement('span');
+            textNode.textContent = content;
+            contentDiv.appendChild(textNode);
+        }
     }
     
     messageDiv.appendChild(avatar);
@@ -721,16 +740,17 @@ function addTypingIndicator() {
     const typingDiv = document.createElement('div');
     typingDiv.id = id;
     typingDiv.className = 'message assistant';
-    typingDiv.innerHTML = `
-        <div class="message-avatar">🤖</div>
-        <div class="message-content">
-            <div class="typing-indicator">
-                <span></span>
-                <span></span>
-                <span></span>
-            </div>
-        </div>
-    `;
+    const avatar = document.createElement('div');
+    avatar.className = 'message-avatar';
+    avatar.textContent = '🤖';
+    const content = document.createElement('div');
+    content.className = 'message-content';
+    const indicator = document.createElement('div');
+    indicator.className = 'typing-indicator';
+    for (let i = 0; i < 3; i++) indicator.appendChild(document.createElement('span'));
+    content.appendChild(indicator);
+    typingDiv.appendChild(avatar);
+    typingDiv.appendChild(content);
     elements.messagesContainer.appendChild(typingDiv);
     scrollToBottom();
     return id;
@@ -799,7 +819,7 @@ async function loadConversations() {
             deleteBtn.className = 'delete-btn';
             deleteBtn.textContent = '✕';
             deleteBtn.setAttribute('aria-label', 'Elimina conversazione');
-            deleteBtn.onclick = (e) => deleteConversation(conv.id, e);
+            deleteBtn.addEventListener('click', (e) => deleteConversation(conv.id, e));
             
             item.appendChild(titleDiv);
             item.appendChild(metaDiv);
@@ -842,14 +862,7 @@ async function loadConversation(convId) {
             addMessage(msg.role, msg.content);
         });
         if (messages.length === 0) {
-            elements.messagesContainer.innerHTML = `
-                <div class="welcome-message">
-                    <h1>💬 Conversazione vuota</h1>
-                    <p>Nessun messaggio salvato in questa chat</p>
-                </div>
-            `;
-            const qpw = document.getElementById('quickPrompts');
-            if (qpw) qpw.style.display = '';
+            showWelcomeMessage('💬 Conversazione vuota', 'Nessun messaggio salvato in questa chat');
         } else {
             const qpw = document.getElementById('quickPrompts');
             if (qpw) qpw.style.display = 'none';
@@ -906,16 +919,9 @@ async function createNewConversation() {
         
         if (data.success) {
             App.state.currentConversationId = data.conversation_id;
-            elements.messagesContainer.innerHTML = `
-                <div class="welcome-message">
-                    <h1>💬 Nuova Conversazione</h1>
-                    <p>Inizia a chattare con il tuo assistente AI locale</p>
-                </div>
-            `;
+            showWelcomeMessage('💬 Nuova Conversazione', 'Inizia a chattare con il tuo assistente AI locale');
             elements.chatTitle.textContent = 'Nuova Conversazione';
             elements.messageInput.focus();
-            const qpw = document.getElementById('quickPrompts');
-            if (qpw) qpw.style.display = '';
             startGridOrb();
             await loadConversations();
         }
@@ -1161,6 +1167,36 @@ function escapeHTML(str) {
     const div = document.createElement('div');
     div.textContent = str;
     return div.innerHTML;
+}
+
+/**
+ * Renderizza testo Markdown in HTML sicuro.
+ * Richiede marked.js e DOMPurify caricati via CDN.
+ * Fallback a textContent se le librerie non sono pronte.
+ */
+function renderMarkdown(text) {
+    if (!text) return '';
+    if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
+        const html = marked.parse(text, { breaks: true, gfm: true });
+        return DOMPurify.sanitize(html);
+    }
+    // Fallback: escape HTML
+    return escapeHTML(text);
+}
+
+/**
+ * Mostra un messaggio di benvenuto/stato vuoto nel container messaggi.
+ * @param {string} title - Titolo del messaggio
+ * @param {string} subtitle - Sottotitolo
+ */
+function showWelcomeMessage(title, subtitle) {
+    elements.messagesContainer.innerHTML = `
+        <div class="welcome-message">
+            <h1>${escapeHTML(title)}</h1>
+            <p>${escapeHTML(subtitle)}</p>
+        </div>`;
+    const qpw = document.getElementById('quickPrompts');
+    if (qpw) qpw.style.display = '';
 }
 
 // Sistema di notifiche toast

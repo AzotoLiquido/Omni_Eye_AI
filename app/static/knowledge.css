@@ -1,0 +1,204 @@
+/* Knowledge Base - Stili pagina */
+
+/* Map knowledge CSS vars to cyberpunk theme vars from style.css */
+:root {
+    --primary: var(--accent);
+    --primary-dark: var(--accent-strong);
+    --secondary: var(--success);
+    --bg-primary: rgba(6, 14, 8, 0.95);
+    --bg-tertiary: var(--bg-veil-strong);
+    --text-primary: var(--ink);
+    --text-secondary: var(--ink-soft);
+    --border: var(--line);
+}
+
+.kb-container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 2rem;
+}
+
+.kb-header {
+    text-align: center;
+    margin-bottom: 3rem;
+}
+
+.kb-header h1 {
+    font-size: 2.5rem;
+    color: var(--primary);
+    margin-bottom: 0.5rem;
+}
+
+.kb-header p {
+    color: var(--text-secondary);
+    font-size: 1.1rem;
+}
+
+.kb-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+    gap: 2rem;
+    margin-bottom: 2rem;
+}
+
+.kb-card {
+    background: var(--bg-primary);
+    border-radius: 12px;
+    padding: 1.5rem;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.55);
+    border: 1px solid var(--border);
+}
+
+.kb-card h2 {
+    color: var(--primary);
+    margin-bottom: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.kb-card-icon {
+    font-size: 1.5rem;
+}
+
+.kb-stat {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.75rem 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.kb-stat:last-child {
+    border-bottom: none;
+}
+
+.kb-stat-label {
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.kb-stat-value {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.entity-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 1rem;
+}
+
+.entity-tag {
+    background: var(--bg-tertiary);
+    color: var(--primary);
+    padding: 0.4rem 0.8rem;
+    border-radius: 20px;
+    font-size: 0.9rem;
+    font-weight: 500;
+}
+
+.topic-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem;
+    background: var(--bg-tertiary);
+    border-radius: 8px;
+    margin-bottom: 0.5rem;
+}
+
+.topic-name {
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.topic-count {
+    background: var(--primary);
+    color: white;
+    padding: 0.25rem 0.75rem;
+    border-radius: 12px;
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+
+.search-box {
+    width: 100%;
+    padding: 1rem;
+    border: 2px solid var(--border);
+    border-radius: 8px;
+    font-size: 1rem;
+    margin-bottom: 1rem;
+    transition: border-color 0.3s;
+}
+
+.search-box:focus {
+    outline: none;
+    border-color: var(--primary);
+}
+
+.btn {
+    padding: 0.75rem 1.5rem;
+    background: var(--primary);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.3s;
+}
+
+.btn:hover {
+    background: var(--primary-dark);
+}
+
+.btn-secondary {
+    background: var(--secondary);
+}
+
+.btn-secondary:hover {
+    background: #475569;
+}
+
+.loading {
+    text-align: center;
+    padding: 2rem;
+    color: var(--text-secondary);
+}
+
+.empty-state {
+    text-align: center;
+    padding: 3rem;
+    color: var(--text-secondary);
+}
+
+.empty-state-icon {
+    font-size: 4rem;
+    margin-bottom: 1rem;
+}
+
+.back-link {
+    display: inline-block;
+    padding: 0.75rem 1.5rem;
+    background: var(--secondary);
+    color: white;
+    text-decoration: none;
+    border-radius: 8px;
+    margin-bottom: 2rem;
+    transition: background 0.3s;
+}
+
+.back-link:hover {
+    background: #475569;
+}
+
+pre {
+    background: var(--bg-tertiary);
+    padding: 1rem;
+    border-radius: 8px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    font-size: 0.9rem;
+    line-height: 1.6;
+}

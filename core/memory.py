@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import threading
 import uuid
 from datetime import datetime
 import time as _time
@@ -37,6 +38,7 @@ class ConversationMemory:
     _conv_list_cache = None
     _conv_list_cache_time = 0
     _CACHE_TTL = 2.0  # seconds
+    _cache_lock = threading.Lock()  # Thread-safe cache access
     
     def __init__(self):
         """Inizializza il sistema di memoria"""
@@ -169,9 +171,10 @@ class ConversationMemory:
         """
         # P2-9: Return cached result if fresh enough
         now = _time.monotonic()
-        if (ConversationMemory._conv_list_cache is not None
-                and now - ConversationMemory._conv_list_cache_time < self._CACHE_TTL):
-            return list(ConversationMemory._conv_list_cache)
+        with ConversationMemory._cache_lock:
+            if (ConversationMemory._conv_list_cache is not None
+                    and now - ConversationMemory._conv_list_cache_time < self._CACHE_TTL):
+                return list(ConversationMemory._conv_list_cache)
         
         conversations = []
         
@@ -192,8 +195,9 @@ class ConversationMemory:
         except Exception as e:
             logger.error("Errore lista conversazioni: %s", e)
         
-        ConversationMemory._conv_list_cache = conversations
-        ConversationMemory._conv_list_cache_time = now
+        with ConversationMemory._cache_lock:
+            ConversationMemory._conv_list_cache = conversations
+            ConversationMemory._conv_list_cache_time = now
         return list(conversations)
     
     def delete_conversation(self, conv_id: str) -> bool:
@@ -212,7 +216,8 @@ class ConversationMemory:
         try:
             if os.path.exists(filepath):
                 os.remove(filepath)
-                ConversationMemory._conv_list_cache = None  # Invalidate cache
+                with ConversationMemory._cache_lock:
+                    ConversationMemory._conv_list_cache = None  # Invalidate cache
                 return True
             return False
         except Exception as e:
@@ -259,7 +264,8 @@ class ConversationMemory:
             with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump(conversation, f, ensure_ascii=False, indent=2)
             os.replace(tmp_path, filepath)
-            ConversationMemory._conv_list_cache = None  # Invalidate cache
+            with ConversationMemory._cache_lock:
+                ConversationMemory._conv_list_cache = None  # Invalidate cache
             return True
         except Exception as e:
             logger.error("Errore salvataggio conversazione %s: %s", conv_id, e)

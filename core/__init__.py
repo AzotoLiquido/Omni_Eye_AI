@@ -8,12 +8,14 @@ from .document_processor import DocumentProcessor
 
 
 def __getattr__(name):
-    """Lazy import for AIEngine and AdvancedMemory"""
+    """Lazy import for AIEngine and AdvancedMemory — cached into globals()"""
     if name == 'AIEngine':
         from .ai_engine import AIEngine
+        globals()['AIEngine'] = AIEngine
         return AIEngine
     if name == 'AdvancedMemory':
         from .advanced_memory import AdvancedMemory
+        globals()['AdvancedMemory'] = AdvancedMemory
         return AdvancedMemory
     raise AttributeError(f"module 'core' has no attribute {name!r}")
 

@@ -106,7 +106,8 @@ class PilotConfig:
 
     @property
     def raw(self) -> Dict[str, Any]:
-        return self._raw
+        import copy
+        return copy.deepcopy(self._raw)
 
     # --- Meta ---
     @property

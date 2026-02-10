@@ -132,7 +132,7 @@ class EntityTracker:
             storage_path: Percorso al file JSON per salvare le entitÃ 
         """
         self.storage_path = storage_path
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # RLock: extract_and_save → _save_entities nesting
         self.entities = self._load_entities()
     
     def _load_entities(self) -> Dict:

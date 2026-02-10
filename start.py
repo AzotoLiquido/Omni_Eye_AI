@@ -5,7 +5,6 @@ Omni Eye AI - Script di Avvio Rapido
 import sys
 import os
 import subprocess
-import time
 
 # Aggiungi la directory corrente al path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -36,12 +35,6 @@ def check_dependencies():
     print("\n🔍 Verifica dipendenze...")
     
     required = ['flask', 'ollama', 'PyPDF2', 'docx', 'flask_cors', 'flask_limiter', 'flask_wtf']
-    # Packages with different import vs pip names
-    _IMPORT_MAP = {
-        'docx': 'docx',
-        'flask_limiter': 'flask_limiter',
-        'flask_wtf': 'flask_wtf',
-    }
     missing = []
     
     for package in required:

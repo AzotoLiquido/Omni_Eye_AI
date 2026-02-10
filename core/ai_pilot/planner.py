@@ -275,11 +275,14 @@ class ReActPlanner:
                             return tool_id, {"action": "search", "query": quoted[0]}
                         elif tool_id == "py":
                             return tool_id, {"code": quoted[0]}
-                    # Nessun parametro trovato - return hint instead of empty dict
+                    # Nessun parametro trovato - provide sensible defaults
                     if tool_id == "fs":
                         return tool_id, {"action": "list", "path": "."}
                     elif tool_id == "db":
-                        return tool_id, {"action": "search", "query": ""}
+                        # Extract a search hint from the output itself
+                        words = [w for w in output.split() if len(w) > 3]
+                        hint = " ".join(words[:5]) if words else "ricerca"
+                        return tool_id, {"action": "search", "query": hint}
                     return tool_id, {}
 
         return None, {}
@@ -310,6 +313,7 @@ def create_planner(cfg: PilotConfig, tool_executor: ToolExecutor):
     if strategy == "simple":
         return SimplePlanner()
     elif strategy in ("react", "tree_of_thought"):
+        # tree_of_thought currently uses ReActPlanner (same implementation)
         return ReActPlanner(cfg, tool_executor)
     else:
         return SimplePlanner()
