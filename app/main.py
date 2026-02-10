@@ -103,7 +103,7 @@ _MULTILINGUAL_VISION = ('minicpm-v', 'llava:13b', 'llava-llama3')
 
 # Modelli vision EN-only: descrivono solo in inglese
 # → pipeline a 2 fasi (descrizione EN + risposta IT via modello testo)
-_EN_ONLY_VISION = ('moondream', 'bakllava', 'llava-phi3')
+_EN_ONLY_VISION = ('moondream', 'bakllava', 'llava-phi3', 'llava:7b', 'llava')
 
 # Ordine di priorità modelli vision (il primo disponibile viene usato)
 _VISION_PRIORITY = ('minicpm-v', 'llava:13b', 'llava-llama3', 'llava:7b',
@@ -364,7 +364,7 @@ def api_chat_stream():
                 images.append(img)
 
         logger.debug("Richiesta chat: message='%s...', conv_id=%s, images=%d",
-                      user_message[:50], conv_id, len(images) if images else 0)
+                      user_message[:50] if user_message else '', conv_id, len(images) if images else 0)
         
         if not user_message and not images:
             logger.warning("Chat stream: messaggio vuoto")

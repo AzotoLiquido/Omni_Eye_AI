@@ -995,7 +995,9 @@ function removeFile() {
 
 const IMAGE_UPLOAD_CONFIG = {
     maxSize: 20 * 1024 * 1024,  // 20MB
-    allowedTypes: ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp'],
+    allowedTypes: ['image/jpeg', 'image/png', 'image/webp'],
+    maxDimension: 1024,         // ridimensiona a max 1024px (lato lungo)
+    outputQuality: 0.85,        // qualità JPEG/WebP dopo resize
 };
 
 /**
@@ -1016,26 +1018,23 @@ function handleImageUpload(e) {
 
     // Validazione tipo
     if (!IMAGE_UPLOAD_CONFIG.allowedTypes.includes(file.type)) {
-        showNotification('❌ Formato non supportato. Usa: JPG, PNG, GIF, WebP, BMP', 'error');
+        showNotification('❌ Formato non supportato. Usa: JPG, PNG, WebP', 'error');
         elements.imageInput.value = '';
         return;
     }
 
-    // Leggi come base64
-    const reader = new FileReader();
-    reader.onload = function(ev) {
-        const dataUrl = ev.target.result;                 // data:image/png;base64,...
-        const base64 = dataUrl.split(',')[1];             // solo la parte base64
-
-        App.state.pendingImages = [{
+    // P1-1: Ridimensiona via canvas prima di convertire in base64
+    _resizeAndEncodeImage(file).then(({ base64, dataUrl }) => {
+        App.state.pendingImages.push({
             base64: base64,
             name: file.name,
             dataUrl: dataUrl
-        }];
+        });
 
-        // Mostra anteprima
+        // Mostra anteprima (ultima immagine aggiunta)
         elements.imageThumb.src = dataUrl;
-        elements.imageName.textContent = file.name;
+        const names = App.state.pendingImages.map(i => i.name).join(', ');
+        elements.imageName.textContent = names;
         elements.imagePreview.style.display = 'block';
 
         // Abilita invio anche senza testo
@@ -1049,12 +1048,53 @@ function handleImageUpload(e) {
             );
         }
 
-        showNotification('🖼️ Immagine pronta per l\'analisi', 'success');
-    };
-    reader.onerror = function() {
-        showNotification('❌ Errore lettura immagine', 'error');
-    };
-    reader.readAsDataURL(file);
+        const count = App.state.pendingImages.length;
+        const label = count > 1 ? `${count} immagini pronte` : 'Immagine pronta';
+        showNotification(`🖼️ ${label} per l'analisi`, 'success');
+    }).catch(() => {
+        showNotification('❌ Errore elaborazione immagine', 'error');
+    });
+}
+
+/**
+ * Ridimensiona un'immagine a max IMAGE_UPLOAD_CONFIG.maxDimension px
+ * e la codifica in base64 JPEG/WebP per ridurre il payload.
+ * @returns {Promise<{base64: string, dataUrl: string}>}
+ */
+function _resizeAndEncodeImage(file) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = function() {
+            const max = IMAGE_UPLOAD_CONFIG.maxDimension;
+            let w = img.naturalWidth;
+            let h = img.naturalHeight;
+
+            // Ridimensiona solo se supera il limite
+            if (w > max || h > max) {
+                if (w >= h) {
+                    h = Math.round(h * (max / w));
+                    w = max;
+                } else {
+                    w = Math.round(w * (max / h));
+                    h = max;
+                }
+            }
+
+            const canvas = document.createElement('canvas');
+            canvas.width = w;
+            canvas.height = h;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, w, h);
+
+            // Codifica come JPEG (più compatto per vision)
+            const quality = IMAGE_UPLOAD_CONFIG.outputQuality;
+            const dataUrl = canvas.toDataURL('image/jpeg', quality);
+            const base64 = dataUrl.split(',')[1];
+            resolve({ base64, dataUrl });
+        };
+        img.onerror = reject;
+        img.src = URL.createObjectURL(file);
+    });
 }
 
 /**
