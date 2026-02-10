@@ -4,6 +4,7 @@ Processore Documenti - Estrae testo da vari formati di file
 
 import logging
 import os
+import time
 from typing import Optional, Tuple
 import config
 
@@ -193,7 +194,11 @@ class DocumentProcessor:
         if len(name) > max_name_len:
             name = name[:max_name_len]
         safe = name + ext
-        return safe.strip('. ')  # Rimuovi punti e spazi iniziali/finali
+        safe = safe.strip('. ')
+        # Proteggi da filename vuoto dopo sanitizzazione
+        if not safe:
+            safe = "_upload"
+        return safe
     
     def get_file_info(self, filepath: str) -> dict:
         """
@@ -224,7 +229,6 @@ class DocumentProcessor:
         Args:
             days: Numero di giorni
         """
-        import time
         current_time = time.time()
         max_age = days * 24 * 60 * 60  # in secondi
         

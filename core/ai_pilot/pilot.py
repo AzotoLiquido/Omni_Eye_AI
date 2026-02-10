@@ -16,6 +16,7 @@ Offre due modalità:
 
 import json
 import re
+import threading
 from typing import Dict, Generator, List, Tuple
 
 from .config_loader import PilotConfig
@@ -222,10 +223,17 @@ class Pilot:
                 full_response += chunk
                 yield chunk
 
+            # Applica post-processing (artefatti ReAct già inviati
+            # in streaming non si possono ritirare, ma puliamo per il log)
             response = self._post_process(full_response)
 
-        # Post-processing asincrono (estrazione fatti)
-        self._extract_and_store_facts(user_message, ai_engine)
+        # Post-processing asincrono (estrazione fatti in thread separato)
+        t = threading.Thread(
+            target=self._extract_and_store_facts,
+            args=(user_message, ai_engine),
+            daemon=True,
+        )
+        t.start()
 
         # Log turno assistente
         self.logger.log_conversation_turn(conv_id, "assistant", response)

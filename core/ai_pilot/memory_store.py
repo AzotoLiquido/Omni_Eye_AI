@@ -208,8 +208,9 @@ class MemoryStore:
         return [dict(r) for r in rows]
 
     def delete_fact(self, fact_id: int) -> bool:
-        cur = self._conn.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
-        self._conn.commit()
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
+            self._conn.commit()
         return cur.rowcount > 0
 
     # ==================================================================
@@ -219,21 +220,23 @@ class MemoryStore:
     def add_task(self, title: str, due_at: str = None, payload: dict = None) -> int:
         """Crea un nuovo task"""
         now = datetime.now().isoformat()
-        cur = self._conn.execute(
-            "INSERT INTO tasks (title, status, due_at, payload, created_at, updated_at) "
-            "VALUES (?, 'open', ?, ?, ?, ?)",
-            (title, due_at, json.dumps(payload or {}), now, now)
-        )
-        self._conn.commit()
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO tasks (title, status, due_at, payload, created_at, updated_at) "
+                "VALUES (?, 'open', ?, ?, ?, ?)",
+                (title, due_at, json.dumps(payload or {}), now, now)
+            )
+            self._conn.commit()
         return cur.lastrowid
 
     def update_task_status(self, task_id: int, status: str) -> bool:
         now = datetime.now().isoformat()
-        cur = self._conn.execute(
-            "UPDATE tasks SET status=?, updated_at=? WHERE id=?",
-            (status, now, task_id)
-        )
-        self._conn.commit()
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE tasks SET status=?, updated_at=? WHERE id=?",
+                (status, now, task_id)
+            )
+            self._conn.commit()
         return cur.rowcount > 0
 
     def get_open_tasks(self) -> List[Dict]:
@@ -249,8 +252,9 @@ class MemoryStore:
         return [dict(r) for r in rows]
 
     def delete_task(self, task_id: int) -> bool:
-        cur = self._conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-        self._conn.commit()
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+            self._conn.commit()
         return cur.rowcount > 0
 
     # ==================================================================
@@ -267,22 +271,24 @@ class MemoryStore:
         ids = []
         now = datetime.now().isoformat()
 
-        try:
-            # Rimuovi chunk precedenti dello stesso documento
-            self._conn.execute("DELETE FROM documents WHERE path = ?", (path,))
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN")
+                # Rimuovi chunk precedenti dello stesso documento
+                self._conn.execute("DELETE FROM documents WHERE path = ?", (path,))
 
-            for idx, chunk in enumerate(chunks):
-                cur = self._conn.execute(
-                    "INSERT INTO documents (path, chunk_idx, content, tags, created_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (path, idx, chunk, json.dumps(tags or []), now)
-                )
-                ids.append(cur.lastrowid)
+                for idx, chunk in enumerate(chunks):
+                    cur = self._conn.execute(
+                        "INSERT INTO documents (path, chunk_idx, content, tags, created_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (path, idx, chunk, json.dumps(tags or []), now)
+                    )
+                    ids.append(cur.lastrowid)
 
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
 
         return ids
 
@@ -309,8 +315,9 @@ class MemoryStore:
 
     def delete_document(self, path: str) -> int:
         """Rimuove tutti i chunk di un documento"""
-        cur = self._conn.execute("DELETE FROM documents WHERE path = ?", (path,))
-        self._conn.commit()
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM documents WHERE path = ?", (path,))
+            self._conn.commit()
         return cur.rowcount
 
     # ==================================================================

@@ -145,10 +145,13 @@ class ToolExecutor:
         else:
             return ToolResult(tool_id, False, "", f"Azione filesystem sconosciuta: {action}")
 
-    # Pattern import pericolosi bloccati nella sandbox Python
+    # Pattern import/builtin pericolosi bloccati nella sandbox Python
     _DANGEROUS_PY = re.compile(
         r'\b(?:import|from)\s+(?:os|subprocess|shutil|socket|ctypes|signal|'
-        r'multiprocessing|webbrowser)\b'
+        r'multiprocessing|webbrowser|importlib)\b|'
+        r'\b__import__\s*\(|'
+        r'\bexec\s*\(|\beval\s*\(|'
+        r'\bimportlib\b|\bgetattr\s*\(\s*__builtins__'
     )
 
     def _exec_python(self, tool_id: str, tool_cfg: Dict, params: Dict) -> ToolResult:

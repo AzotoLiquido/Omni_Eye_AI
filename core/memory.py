@@ -24,39 +24,9 @@ def _validate_conv_id(conv_id: str) -> str:
     return conv_id
 
 
-# File locking cross-platform
-try:
-    import msvcrt
-
-    def _lock_file(f):
-        """Blocca l'intero file (Windows)"""
-        f.seek(0, 2)          # vai alla fine
-        size = f.tell() or 1  # almeno 1 byte
-        f.seek(0)
-        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, size)
-
-    def _unlock_file(f):
-        f.seek(0, 2)
-        size = f.tell() or 1
-        f.seek(0)
-        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, size)
-
-except ImportError:
-    try:
-        import fcntl
-
-        def _lock_file(f):
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-        def _unlock_file(f):
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-    except ImportError:
-        # Fallback: nessun locking (piattaforma sconosciuta)
-        def _lock_file(f):
-            pass
-
-        def _unlock_file(f):
-            pass
+# File locking cross-platform (riservato per uso futuro, attualmente
+# _save_conversation usa la strategia atomica temp+replace)
+# Se necessario, importare _lock_file/_unlock_file da qui.
 
 
 class ConversationMemory:

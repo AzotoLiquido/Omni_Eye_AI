@@ -169,10 +169,11 @@ class EntityTracker:
         
         timestamp = datetime.now().isoformat()
         
-        # Pattern per estrarre informazioni
-        self._extract_names(message, timestamp)
-        self._extract_preferences(message, timestamp)
-        self._extract_dates(message, timestamp)
+        # Lock per thread safety (le _extract_* modificano self.entities)
+        with self._lock:
+            self._extract_names(message, timestamp)
+            self._extract_preferences(message, timestamp)
+            self._extract_dates(message, timestamp)
         
         self._save_entities()
     
@@ -280,9 +281,12 @@ class EntityTracker:
             if name.lower() in text_lower:
                 relevant.append(f"â€¢ {name}: menzionato precedentemente")
         
-        # Cerca preferenze rilevanti
-        for key, pref in list(self.entities['preferences'].items())[:5]:
-            relevant.append(f"â€¢ Preferenza: {pref['sentiment']} {pref['value']}")
+        # Cerca preferenze rilevanti per la query (non tutte)
+        for key, pref in self.entities['preferences'].items():
+            if pref['value'].lower() in text_lower or pref['sentiment'].lower() in text_lower:
+                relevant.append(f"• Preferenza: {pref['sentiment']} {pref['value']}")
+                if len(relevant) >= 8:
+                    break
         
         if relevant:
             return "[INFORMAZIONI CONTESTUALI]\n" + "\n".join(relevant) + "\n"
@@ -404,9 +408,6 @@ class KnowledgeBase:
         text_lower = text.lower()
         for topic, keywords in topics.items():
             if any(keyword in text_lower for keyword in keywords):
-                if 'topics_discussed' not in self.knowledge:
-                    self.knowledge['topics_discussed'] = {}
-                
                 self.knowledge['topics_discussed'][topic] = \
                     self.knowledge['topics_discussed'].get(topic, 0) + 1
     
