@@ -23,6 +23,7 @@ from core import AIEngine, DocumentProcessor
 from core.advanced_memory import AdvancedMemory
 from core.ai_pilot import Pilot
 from core.web_search import search_and_format
+from core.model_router import ModelRouter, ModelMapping, Intent, classify_intent
 from app.vision import (
     VISION_ONLY_TAGS, MULTILINGUAL_VISION, VISION_PRIORITY,
     VISION_SYSTEM_PROMPT, user_visible_models, vision_model_priority,
@@ -82,6 +83,31 @@ ai_engine = AIEngine()
 memory = AdvancedMemory()  # Sistema avanzato con context management
 doc_processor = DocumentProcessor()
 
+# Inizializza Model Router (instradamento intelligente multi-modello)
+_router_cfg = getattr(config, 'MODEL_ROUTER_CONFIG', {})
+if _router_cfg.get('enabled', False):
+    _models = _router_cfg.get('models', {})
+    model_router = ModelRouter(
+        mapping=ModelMapping(
+            general=_models.get('general', 'gemma2:9b'),
+            code=_models.get('code', 'qwen2.5-coder:7b'),
+            vision=_models.get('vision', 'minicpm-v'),
+        ),
+        fallback_model=_router_cfg.get('fallback', 'llama3.2'),
+    )
+    # Popola la cache dei modelli installati
+    _installed = ai_engine.list_available_models()
+    model_router.refresh_installed(_installed)
+    # Imposta il warm model iniziale
+    model_router.warm_model = ai_engine.model
+    ROUTER_ENABLED = True
+    logger.info("Model Router: ATTIVO (general=%s, code=%s, vision=%s)",
+                _models.get('general'), _models.get('code'), _models.get('vision'))
+else:
+    model_router = None
+    ROUTER_ENABLED = False
+    logger.info("Model Router: DISATTIVATO (modello singolo: %s)", ai_engine.model)
+
 # Inizializza AI-Pilot (orchestratore avanzato)
 try:
     pilot = Pilot()
@@ -124,7 +150,12 @@ def api_status():
         'ollama_available': ollama_ok,
         'model_available': model_ok,
         'model_name': ai_engine.model,
-        'available_models': user_visible_models(ai_engine) if ollama_ok else []
+        'available_models': user_visible_models(ai_engine) if ollama_ok else [],
+        'router': {
+            'enabled': ROUTER_ENABLED,
+            'models': model_router.mapping.__dict__ if ROUTER_ENABLED and model_router else None,
+            'warm_model': model_router.warm_model if ROUTER_ENABLED and model_router else None,
+        },
     })
 
 
@@ -221,6 +252,15 @@ def api_chat():
     
     # Genera risposta
     try:
+        # Model routing: seleziona modello ottimale per l'intento
+        route_result = None
+        routed_model = None
+        if ROUTER_ENABLED and model_router:
+            route_result = model_router.route(user_message)
+            routed_model = route_result.model
+            if route_result.is_swap:
+                logger.info("Router swap → %s (intent=%s)", routed_model, route_result.intent.value)
+
         if PILOT_ENABLED and pilot:
             response, meta = pilot.process(
                 user_message,
@@ -228,12 +268,14 @@ def api_chat():
                 ai_engine=ai_engine,
                 conv_id=conv_id,
                 extra_instructions=pilot_extra if PILOT_ENABLED and pilot else "",
+                model=routed_model,
             )
         else:
             response = ai_engine.generate_response(
                 user_message, 
                 conversation_history=history,
-                system_prompt=system_prompt
+                system_prompt=system_prompt,
+                model=routed_model,
             )
             meta = {}
         
@@ -249,7 +291,8 @@ def api_chat():
             'response': response,
             'conversation_id': conv_id,
             'success': True,
-            'pilot_meta': meta if meta else None
+            'pilot_meta': meta if meta else None,
+            'route': route_result.to_dict() if route_result else None,
         })
     
     except Exception as e:
@@ -361,6 +404,16 @@ def api_chat_stream():
     # Modalità "augmented": inietta contesto web nel system prompt
     if web_mode == "augmented":
         system_prompt = web_search_data["context"] + "\n\n" + system_prompt
+
+    # Model routing per streaming
+    stream_route = None
+    stream_routed_model = None
+    if ROUTER_ENABLED and model_router:
+        stream_route = model_router.route(user_message, has_images=bool(images))
+        stream_routed_model = stream_route.model
+        if stream_route.is_swap:
+            logger.info("Router stream swap → %s (intent=%s)",
+                        stream_routed_model, stream_route.intent.value)
     
     def generate():
         """Generator per lo streaming"""
@@ -419,26 +472,31 @@ def api_chat_stream():
 
             # Auto-switch a modello vision se ci sono immagini
             elif images:
-                all_models = ai_engine.list_available_models()
-                vision_models = [m for m in all_models
-                                 if any(v in m.lower() for v in VISION_PRIORITY)]
-                # Ordina per priorità definita in VISION_PRIORITY
-                vision_models.sort(key=vision_model_priority)
-
-                current = ai_engine.model.lower()
-                is_vision = any(v in current for v in VISION_PRIORITY)
-
-                if not is_vision and vision_models:
-                    vision_model = vision_models[0]
-                    logger.info("Auto-switch a modello vision: %s", vision_model)
-                elif not is_vision and not vision_models:
-                    yield f"data: ⚠️ Nessun modello vision installato. Scaricane uno con: ollama pull minicpm-v\n\n"
-                    yield f"event: end\ndata: {conv_id}\n\n"
-                    return
+                # Se il router è attivo, usa il modello vision configurato
+                if ROUTER_ENABLED and model_router and stream_routed_model:
+                    vision_model = stream_routed_model
+                    logger.info("Router vision → %s", vision_model)
                 else:
-                    vision_model = ai_engine.model
+                    all_models = ai_engine.list_available_models()
+                    vision_models = [m for m in all_models
+                                     if any(v in m.lower() for v in VISION_PRIORITY)]
+                    vision_models.sort(key=vision_model_priority)
 
-                text_model = config.AI_CONFIG['model']
+                    current = ai_engine.model.lower()
+                    is_vision = any(v in current for v in VISION_PRIORITY)
+
+                    if not is_vision and vision_models:
+                        vision_model = vision_models[0]
+                        logger.info("Auto-switch a modello vision: %s", vision_model)
+                    elif not is_vision and not vision_models:
+                        yield f"data: ⚠️ Nessun modello vision installato. Scaricane uno con: ollama pull minicpm-v\n\n"
+                        yield f"event: end\ndata: {conv_id}\n\n"
+                        return
+                    else:
+                        vision_model = ai_engine.model
+
+                text_model = (model_router.mapping.general if ROUTER_ENABLED and model_router
+                              else config.AI_CONFIG['model'])
                 is_multilingual = any(tag in vision_model.lower()
                                       for tag in MULTILINGUAL_VISION)
 
@@ -537,6 +595,7 @@ def api_chat_stream():
                     conv_id=conv_id,
                     images=images,
                     extra_instructions=pilot_extra_stream if PILOT_ENABLED and pilot else "",
+                    model=stream_routed_model,
                 ):
                     full_response += chunk
                     yield _sse_data(chunk)
@@ -546,6 +605,7 @@ def api_chat_stream():
                     conversation_history=clean_history,
                     system_prompt=system_prompt,
                     images=images,
+                    model=stream_routed_model,
                 ):
                     full_response += chunk
                     yield _sse_data(chunk)
@@ -858,6 +918,10 @@ def api_change_model():
     
     with _model_lock:
         success = ai_engine.change_model(new_model)
+        # Aggiorna il router se il cambio è avvenuto
+        if success and ROUTER_ENABLED and model_router:
+            model_router.warm_model = new_model
+            model_router.refresh_installed(ai_engine.list_available_models())
     
     return jsonify({
         'success': success,

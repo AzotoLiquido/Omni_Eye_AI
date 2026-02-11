@@ -173,6 +173,7 @@ class Pilot:
         ai_engine=None,
         conv_id: str = "",
         extra_instructions: str = "",
+        model: str = None,
     ) -> Tuple[str, Dict]:
         """
         Processa un messaggio con il ciclo completo del Pilot.
@@ -183,6 +184,7 @@ class Pilot:
             ai_engine:           Istanza di AIEngine per generare risposte
             conv_id:             ID conversazione per logging
             extra_instructions:  Istruzioni extra da aggiungere al system prompt
+            model:               Override modello (da ModelRouter)
 
         Returns:
             (risposta_finale, metadata)
@@ -203,7 +205,8 @@ class Pilot:
 
         if use_planning and isinstance(self.planner, ReActPlanner):
             response, plan_meta = self._run_react_loop(
-                user_message, conversation_history, system_prompt, ai_engine
+                user_message, conversation_history, system_prompt, ai_engine,
+                model=model,
             )
             metadata.update(plan_meta)
         else:
@@ -212,6 +215,7 @@ class Pilot:
                 user_message,
                 conversation_history=conversation_history,
                 system_prompt=system_prompt,
+                model=model,
             )
 
         # Post-processing
@@ -238,11 +242,15 @@ class Pilot:
         conv_id: str = "",
         images: List[str] = None,
         extra_instructions: str = "",
+        model: str = None,
     ) -> Generator[str, None, None]:
         """
         Processa un messaggio con streaming.
         Per richieste ReAct, streamma aggiornamenti di stato intermedi
         prima della risposta finale (P1-4).
+
+        Args:
+            model: Override modello (da ModelRouter)
 
         Yields:
             Chunk della risposta
@@ -277,6 +285,7 @@ class Pilot:
                     conversation_history=conversation_history,
                     system_prompt=system_prompt,
                     images=images,
+                    model=model,
                 ):
                     full_response += chunk
                     yield chunk
@@ -310,6 +319,7 @@ class Pilot:
         conversation_history: List[Dict],
         system_prompt: str,
         ai_engine,
+        model: str = None,
     ) -> Tuple[str, Dict]:
         """
         Esegue il ciclo ReAct: Pensiero → Azione → Osservazione → ...
@@ -321,7 +331,8 @@ class Pilot:
         final_answer = ""
         metadata: Dict = {}
         for msg_type, content in self._react_loop_core(
-            user_message, conversation_history, system_prompt, ai_engine
+            user_message, conversation_history, system_prompt, ai_engine,
+            model=model,
         ):
             if msg_type == "answer":
                 final_answer = content
@@ -364,6 +375,7 @@ class Pilot:
         system_prompt: str,
         ai_engine,
         emit_status: bool = False,
+        model: str = None,
     ) -> Generator[Tuple[str, any], None, None]:
         """
         Implementazione unica del ciclo ReAct.
@@ -390,6 +402,7 @@ class Pilot:
                 full_prompt,
                 conversation_history=conversation_history,
                 system_prompt=system_prompt,
+                model=model,
             )
 
             step = self.planner.parse_model_output(output)

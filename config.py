@@ -41,10 +41,22 @@ def _safe_int(val, default):
         return default
 
 AI_CONFIG = {
-    'model': os.getenv('OLLAMA_MODEL', 'llama3.2'),
+    'model': os.getenv('OLLAMA_MODEL', 'gemma2:9b'),
     'temperature': _safe_float(os.getenv('OLLAMA_TEMPERATURE', '0.7'), 0.7),
     'max_tokens': _safe_int(os.getenv('OLLAMA_MAX_TOKENS', '2048'), 2048),
     'context_window': _safe_int(os.getenv('OLLAMA_CONTEXT_WINDOW', '4096'), 4096),
+}
+
+# Configurazione Model Router — instradamento intelligente
+# Ogni intento viene servito dal modello più adatto
+MODEL_ROUTER_CONFIG = {
+    'enabled': os.getenv('MODEL_ROUTER_ENABLED', 'True').lower() == 'true',
+    'models': {
+        'general': os.getenv('ROUTER_MODEL_GENERAL', 'gemma2:9b'),
+        'code': os.getenv('ROUTER_MODEL_CODE', 'qwen2.5-coder:7b'),
+        'vision': os.getenv('ROUTER_MODEL_VISION', 'minicpm-v'),
+    },
+    'fallback': os.getenv('ROUTER_FALLBACK_MODEL', 'llama3.2'),
 }
 
 # Host Ollama (per uso remoto, es. da Termux verso PC)
