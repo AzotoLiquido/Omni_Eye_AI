@@ -16,12 +16,6 @@ VISION_ONLY_TAGS = ('bakllava', 'minicpm-v')
 # → pipeline singola (no fase intermedia in inglese)
 MULTILINGUAL_VISION = ('llava:13b', 'llava-llama3')
 
-# Modelli vision EN-only: descrivono solo in inglese
-# → pipeline a 2 fasi (descrizione EN + risposta IT via modello testo)
-# NOTA: minicpm-v produce italiano impreciso (errori lessicali, ripetizioni)
-#       quindi usa la pipeline 2-fasi per qualità migliore
-EN_ONLY_VISION = ('minicpm-v', 'bakllava', 'llava-phi3', 'llava:7b', 'llava')
-
 # Ordine di priorità modelli vision (il primo disponibile viene usato)
 VISION_PRIORITY = ('minicpm-v', 'llava:13b', 'llava-llama3', 'llava:7b',
                    'llava', 'bakllava', 'vision')

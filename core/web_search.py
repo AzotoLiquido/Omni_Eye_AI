@@ -116,14 +116,55 @@ _FACTUAL_PATTERNS = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
+# ── Pattern per domande personali/self-referenziali ────────────────────
+# Queste NON devono triggerare web search (l'utente chiede di sé stesso
+# o dell'AI, non cerca info fattuali sul web).
+_PERSONAL_QUESTION = re.compile(
+    r"""
+    (?:
+        # "sai chi sono", "sai come mi chiamo", "sai il mio nome / lavoro / età..."
+        sai\s+(?:chi\s+sono|come\s+mi\s+chiamo|il\s+mio\s+nome|quanti\s+anni\s+ho
+             |la\s+mia\s+et[àa]|che\s+lavoro\s+faccio|il\s+mio\s+lavoro
+             |le\s+mie\s+passion[ei]|il\s+mio\s+sesso|i\s+miei\s+obiettiv[oi]
+             |il\s+mio\s+(?:carattere|stato\s+di\s+(?:famiglia|salute)))
+        # "cosa sai su di me", "cosa sai di me", "cosa ricordi di me"
+        | cosa\s+(?:sai|ricordi|conosci)\s+(?:su\s+)?di\s+me
+        # "mi conosci", "ti ricordi di me"
+        | (?:mi\s+conosci|ti\s+ricordi\s+di\s+me)
+        # "chi sono io", "come mi chiamo"
+        | chi\s+sono\s+io
+        | come\s+mi\s+chiamo
+        # "ricordi il mio nome / la mia età / il mio lavoro..."
+        | ricordi\s+(?:il\s+mio\s+nome|la\s+mia\s+et[àa]|quanti\s+anni\s+ho
+                     |il\s+mio\s+lavoro|le\s+mie\s+passion[ei])
+        # "conosci il mio X"
+        | conosci\s+(?:il\s+mio\s+nome|la\s+mia\s+et[àa]|i\s+miei\s+(?:dati|obiettiv[oi]))
+        # English
+        | do\s+you\s+know\s+(?:who\s+I\s+am|my\s+name|me|my\s+age|my\s+job)
+        | what\s+do\s+you\s+know\s+about\s+me
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _is_personal_question(message: str) -> bool:
+    """True se il messaggio è una domanda personale/self-referenziale."""
+    return bool(_PERSONAL_QUESTION.search(message))
+
 
 def needs_web_search(message: str) -> bool:
     """Indica se il messaggio dell'utente richiede probabilmente una ricerca web."""
+    if _is_personal_question(message):
+        return False
     return bool(_SEARCH_PATTERNS.search(message))
 
 
 def needs_factual_search(message: str) -> bool:
     """Indica se il messaggio è una domanda fattuale che beneficerebbe di dati web."""
+    # Non attivare per domande personali/self-referenziali
+    if _is_personal_question(message):
+        return False
     # Non attivare se è già una ricerca esplicita (gestita da needs_web_search)
     if needs_web_search(message):
         return False

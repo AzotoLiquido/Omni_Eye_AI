@@ -28,17 +28,20 @@ def _get_ollama_client() -> ollama.Client:
 
 # ── Rilevamento ripetizioni nello streaming ──────────────────────────
 
-def _detect_repetition(buffer: str, *, min_phrase: int = 40, max_repeats: int = 2) -> bool:
+def _detect_repetition(buffer: str, *, min_phrase: int = 30, max_repeats: int = 2) -> bool:
     """Rileva se il testo in *buffer* contiene un pattern che si ripete.
 
-    Scorre le ultime `min_phrase`..`len(buffer)//2` lunghezze di sotto-stringa
-    dalla coda del buffer e verifica se la stessa frase compare più di
-    *max_repeats* volte.  Ritorna True appena trova una ripetizione.
+    Usa due strategie:
+    1. Frasi lunghe: controlla se sotto-stringhe di 30-300 chars dalla coda
+       compaiono più di *max_repeats* volte.
+    2. N-gram: controlla se sequenze di 4-6 parole si ripetono troppo spesso
+       (più di 3 volte), segnale di loop semantico.
     """
     blen = len(buffer)
     if blen < min_phrase * (max_repeats + 1):
         return False
-    # Controlla frasi di lunghezza crescente
+
+    # ── Strategia 1: frasi identiche ──
     for phrase_len in (min_phrase, min_phrase * 2, min(blen // 3, 300)):
         if phrase_len > blen // 2:
             break
@@ -46,6 +49,19 @@ def _detect_repetition(buffer: str, *, min_phrase: int = 40, max_repeats: int = 
         count = buffer.count(tail)
         if count > max_repeats:
             return True
+
+    # ── Strategia 2: n-gram ripetuti (cattura loop semantici) ──
+    if blen > 200:
+        words = buffer.split()
+        if len(words) >= 20:
+            for n in (5, 4):
+                ngrams: dict[str, int] = {}
+                for i in range(len(words) - n + 1):
+                    gram = ' '.join(words[i:i + n])
+                    ngrams[gram] = ngrams.get(gram, 0) + 1
+                    if ngrams[gram] > 3:
+                        return True
+
     return False
 
 
@@ -254,7 +270,7 @@ class AIEngine:
 
             # Rilevamento ripetizioni in tempo reale (controlla ogni N token)
             running_text = ""
-            _check_interval = 20   # controlla ogni N token, non ad ogni singolo
+            _check_interval = 12   # controlla ogni N token (era 20, ora più reattivo)
             _token_count = 0
             _stream_start = time.perf_counter()
             for chunk in stream:

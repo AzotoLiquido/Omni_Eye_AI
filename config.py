@@ -106,8 +106,8 @@ MODEL_PROFILES = {
         'num_batch': 512,
         'num_thread': 6,
         'num_gpu': -1,
-        'repeat_penalty': 1.3,
-        'repeat_last_n': 128,
+        'repeat_penalty': 1.5,     # più aggressivo (era 1.3) – dolphin tende a loopare
+        'repeat_last_n': 256,      # finestra più ampia (era 128)
         'top_k': 40,
         'top_p': 0.9,
     },

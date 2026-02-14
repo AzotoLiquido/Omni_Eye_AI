@@ -358,12 +358,12 @@ body {
     box-shadow: 0 0 18px rgba(92, 255, 138, 0.8);
 }
 
-.conversation-title {
+.conversation-item .title {
     font-size: 0.85rem;
     font-weight: 600;
 }
 
-.conversation-date {
+.conversation-item .meta {
     font-size: 0.7rem;
     color: var(--ink-soft);
     margin-top: 0.2rem;
@@ -1357,6 +1357,30 @@ body {
     box-shadow: none;
 }
 
+/* Stop Generation Button */
+.btn-stop {
+    width: 2.5rem;
+    height: 2.5rem;
+    background: rgba(255, 60, 60, 0.15);
+    color: #ff4444;
+    border: 1px solid #ff4444;
+    border-radius: 0;
+    transition: all 0.2s ease;
+    font-size: 1rem;
+    cursor: pointer;
+    box-shadow: 0 0 10px rgba(255, 60, 60, 0.2);
+}
+
+.btn-stop:hover {
+    background: #ff4444;
+    color: #000;
+    box-shadow: 0 0 20px rgba(255, 60, 60, 0.6);
+}
+
+.btn-stop:active {
+    transform: scale(0.95);
+}
+
 /* Screen Reader Only */
 .sr-only {
     position: absolute;
@@ -1503,6 +1527,7 @@ body {
 
 .conversation-item:hover {
     box-shadow: 0 0 16px rgba(92, 255, 138, 0.18);
+    transform: translateX(6px) scale(1.01);
 }
 
 .btn-new-chat,
@@ -1514,10 +1539,6 @@ body {
 .btn-send:hover:not(:disabled) {
     transform: translateY(-2px) scale(1.02);
     box-shadow: 0 0 18px rgba(92, 255, 138, 0.45);
-}
-
-.conversation-item:hover {
-    transform: translateX(6px) scale(1.01);
 }
 
 /* Chat header override */

@@ -72,6 +72,7 @@ const elements = {
     imageRemove: document.getElementById('imageRemove'),
     pipelineToggle: document.getElementById('pipelineToggle'),
     pipelinePanel: document.getElementById('pipelinePanel'),
+    stopBtn: document.getElementById('stopBtn'),
 };
 
 // ============================================================================
@@ -93,6 +94,9 @@ async function init() {
     elements.imageRemove.addEventListener('click', removeImage);
     elements.clearBtn.addEventListener('click', clearCurrentChat);
     elements.modelSelect.addEventListener('change', handleModelChange);
+    if (elements.stopBtn) {
+        elements.stopBtn.addEventListener('click', stopGeneration);
+    }
 
     // Sidebar toggle
     const sidebarToggle = document.getElementById('sidebarToggle');
@@ -705,6 +709,12 @@ async function sendMessage() {
     if (App.state.isProcessing) return;
     App.state.isProcessing = true;
     
+    // Mostra pulsante stop e nascondi send
+    if (elements.stopBtn) {
+        elements.stopBtn.style.display = '';
+        elements.sendBtn.style.display = 'none';
+    }
+    
     // Step 2: Prepara UI
     prepareUIForSending();
     
@@ -792,7 +802,20 @@ Domanda utente: ${requestBody.message}`;
         // Step 11: Ripristina UI
         App.state.isProcessing = false;
         App.state.currentAbortController = null;
+        // Nascondi pulsante stop e ripristina send
+        if (elements.stopBtn) {
+            elements.stopBtn.style.display = 'none';
+            elements.sendBtn.style.display = '';
+        }
         restoreUIAfterSending();
+    }
+}
+
+// Interrompi la generazione in corso
+function stopGeneration() {
+    if (App.state.currentAbortController) {
+        App.state.currentAbortController.abort();
+        showNotification('⏹️ Generazione interrotta', 'info');
     }
 }
 
@@ -1098,9 +1121,15 @@ const FILE_UPLOAD_CONFIG = {
         'text/plain',
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
         'application/msword',
-        'text/markdown'
+        'text/markdown',
+        'text/x-python',
+        'application/javascript',
+        'text/javascript',
+        'text/html',
+        'text/css',
+        'application/json'
     ],
-    allowedExtensions: ['.pdf', '.txt', '.docx', '.doc', '.md']
+    allowedExtensions: ['.pdf', '.txt', '.docx', '.doc', '.md', '.py', '.js', '.html', '.css', '.json']
 };
 
 // Upload file
@@ -1122,7 +1151,7 @@ async function handleFileUpload(e) {
                        FILE_UPLOAD_CONFIG.allowedExtensions.includes(fileExt);
     
     if (!isValidType) {
-        showNotification('❌ Tipo di file non supportato. Usa: PDF, TXT, DOCX, MD', 'error');
+        showNotification('❌ Tipo di file non supportato. Usa: PDF, TXT, DOCX, MD, PY, JS, HTML, CSS, JSON', 'error');
         elements.fileInput.value = '';
         return;
     }
@@ -1148,8 +1177,7 @@ async function handleFileUpload(e) {
         if (data.success) {
             App.state.currentUploadedFile = {
                 text: data.text,
-                info: data.file_info,
-                filepath: data.filepath
+                info: data.file_info
             };
             
             showNotification('✅ File caricato con successo', 'success');
@@ -1306,14 +1334,6 @@ function removeImage() {
 // Funzioni di utilità generali
 // ============================================================================
 
-// Sanitizza HTML per prevenire XSS
-function escapeHTML(str) {
-    if (!str) return '';
-    const div = document.createElement('div');
-    div.textContent = str;
-    return div.innerHTML;
-}
-
 /**
  * Configura marked.js (una sola volta).
  * In marked v15 l'opzione 'highlight' è stata rimossa.
@@ -1346,8 +1366,8 @@ function renderMarkdown(text) {
         return clean;
     }
     // Fallback: escape HTML (CDN non caricato)
-    console.warn('renderMarkdown: marked/DOMPurify non disponibili, fallback a escapeHTML');
-    return escapeHTML(text);
+    console.warn('renderMarkdown: marked/DOMPurify non disponibili, fallback a escapeHtml');
+    return escapeHtml(text);
 }
 
 /**
@@ -1376,7 +1396,7 @@ function enhanceCodeBlocks(container) {
         const header = document.createElement('div');
         header.className = 'code-header';
         header.innerHTML = `
-            <span class="code-lang">${escapeHTML(lang || 'code')}</span>
+            <span class="code-lang">${escapeHtml(lang || 'code')}</span>
             <button class="code-copy-btn" title="Copia codice">Copia</button>
         `;
         pre.insertBefore(header, codeEl);
@@ -1401,8 +1421,8 @@ function enhanceCodeBlocks(container) {
 function showWelcomeMessage(title, subtitle) {
     elements.messagesContainer.innerHTML = `
         <div class="welcome-message">
-            <h1>${escapeHTML(title)}</h1>
-            <p>${escapeHTML(subtitle)}</p>
+            <h1>${escapeHtml(title)}</h1>
+            <p>${escapeHtml(subtitle)}</p>
         </div>`;
     const qpw = document.getElementById('quickPrompts');
     if (qpw) {

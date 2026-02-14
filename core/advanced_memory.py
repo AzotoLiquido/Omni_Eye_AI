@@ -498,6 +498,15 @@ class KnowledgeBase:
             return self._conn.execute(
                 "SELECT COUNT(*) FROM facts").fetchone()[0]
 
+    def get_facts_by_source(self):
+        """Raggruppa i fatti per source. Restituisce dict {source: count}."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT source, COUNT(*) as cnt FROM facts "
+                "GROUP BY source ORDER BY cnt DESC"
+            ).fetchall()
+        return {(r[0] or "(nessuna)"): r[1] for r in rows}
+
     @staticmethod
     def _sanitize_fts(query):
         """Escape FTS5 special chars per prevenire injection.
@@ -527,6 +536,18 @@ class KnowledgeBase:
         """
         profile = {
             'name': self._get_kv('name'),
+            'age': self._get_kv('age'),
+            'birthday': self._get_kv('birthday'),
+            'gender': self._get_kv('gender'),
+            'job': self._get_kv('job'),
+            'passions': json.loads(self._get_kv('passions', '[]')),
+            'personality': json.loads(self._get_kv('personality', '[]')),
+            'health': json.loads(self._get_kv('health', '[]')),
+            'physical': json.loads(self._get_kv('physical', '[]')),
+            'family_status': self._get_kv('family_status'),
+            'children': self._get_kv('children'),
+            'family_details': json.loads(self._get_kv('family_details', '[]')),
+            'goals': json.loads(self._get_kv('goals', '[]')),
             'interests': json.loads(self._get_kv('interests', '[]')),
             'expertise': json.loads(self._get_kv('expertise', '[]')),
             'language': self._get_kv('language', 'italiano'),
@@ -550,45 +571,405 @@ class KnowledgeBase:
             self._conn.commit()
         for msg in messages:
             if msg['role'] == 'user':
-                content_lower = msg['content'].lower()
-                if 'mi chiamo' in content_lower or 'sono' in content_lower:
-                    self._extract_user_name(msg['content'])
-                if any(w in content_lower
-                       for w in ['interessa', 'piace', 'passione']):
-                    self._extract_interests(msg['content'])
+                self.extract_personal_info(msg['content'])
                 self._count_topics(msg['content'])
         self._set_kv('last_updated', datetime.now().isoformat())
 
+    # -- Helpers ---------------------------------------------------------------
+
+    _RE_ARTICLES = re.compile(r"^(?:il|la|lo|le|i|gli|un|uno|una|l['\u2019])\s*", re.IGNORECASE)
+
+    @staticmethod
+    def _strip_articles(text):
+        """Rimuove articoli italiani iniziali e avverbi superflui."""
+        text = re.sub(r'^(?:anche|pure|poi)\s+', '', text.strip())
+        return KnowledgeBase._RE_ARTICLES.sub('', text).strip()
+
+    # Pre-compiled patterns per performance (riusati ad ogni messaggio)
+    _RE_NAME = [
+        re.compile(r'mi chiamo (\w+)', re.IGNORECASE),
+        re.compile(r'il mio nome [e\u00e8] (\w+)', re.IGNORECASE),
+        re.compile(r'(?:io\s+)?sono (\w+)', re.IGNORECASE),
+        re.compile(r'chiamami (\w+)', re.IGNORECASE),
+        re.compile(r'mi (?:presento|faccio chiamare)[,:]?\s*(\w+)', re.IGNORECASE),
+    ]
+    _RE_AGE = re.compile(r'(?:ho|compio|compir\u00f2)\s+(\d{1,3})\s+anni', re.IGNORECASE)
+    _RE_BDAY_NUM = re.compile(
+        r'(?:sono\s+nat[oa]|compleanno|nato|nata)'
+        r'[^\d]{0,20}(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})', re.IGNORECASE)
+    _RE_PHYSICAL = {
+        'altezza': re.compile(
+            r'(?:(?:sono\s+)?alt[oa]|altezza)[:\s]+'
+            r'(\d[,.]?\d{0,2})\s*(?:m(?:etri)?|cm)?', re.IGNORECASE),
+        'peso': re.compile(
+            r'peso\s+(?:di\s+)?(\d{2,3})\s*(?:kg|chili)?', re.IGNORECASE),
+        'capelli': re.compile(
+            r'capelli\s+(\w+)', re.IGNORECASE),
+        'occhi': re.compile(
+            r'occhi\s+(\w+)', re.IGNORECASE),
+        'corporatura': re.compile(
+            r'(?:corporatura|fisico)\s+(\w+)', re.IGNORECASE),
+    }
+    _RE_CHILDREN = re.compile(
+        r'ho\s+(?:(\d+)|un[oa]?)\s+figli[oa]?', re.IGNORECASE)
+    _NUMERI_IT = {'due': '2', 'tre': '3', 'quattro': '4', 'cinque': '5',
+                  'sei': '6'}
+    _RE_CHILDREN_WORD = re.compile(
+        r'ho\s+(due|tre|quattro|cinque|sei)\s+figli', re.IGNORECASE)
+
+    # Parole italiane comuni che seguono "sono" ma NON sono nomi propri
+    _NOT_NAMES = frozenset({
+        'interessato', 'interessata', 'appassionato', 'appassionata',
+        'curioso', 'curiosa', 'italiano', 'italiana',
+        'stanco', 'stanca', 'felice', 'triste', 'sicuro', 'sicura',
+        'contento', 'contenta', 'nuovo', 'nuova', 'qui', 'nato', 'nata',
+        'pronto', 'pronta', 'davvero', 'anche', 'molto', 'ancora',
+        'uno', 'una', 'bravo', 'brava', 'grande', 'alto', 'alta',
+        'allergico', 'allergica', 'fidanzato', 'fidanzata',
+        'sposato', 'sposata', 'single', 'separato', 'separata',
+        'stato', 'stata', 'certo', 'certa', 'disposto', 'disposta',
+    })
+
     def _extract_user_name(self, text):
-        patterns = [r'mi chiamo (\w+)', r'il mio nome \u00e8 (\w+)']
-        for pattern in patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
+        for rx in self._RE_NAME:
+            match = rx.search(text)
             if match:
                 name = match.group(1).strip()
-                if len(name) > 2 and name[0].isupper():
+                if (len(name) > 2
+                        and name[0].isupper()
+                        and name.lower() not in self._NOT_NAMES):
                     self._set_kv('name', name)
                     return
+
+    def _extract_age(self, text):
+        """Estrae l'et\u00e0 da 'ho 27 anni', 'compio 28 anni'."""
+        match = self._RE_AGE.search(text)
+        if match:
+            age = match.group(1)
+            if 1 <= int(age) <= 130:
+                self._set_kv('age', age)
+
+    _MONTHS_IT = {
+        'gennaio': '01', 'febbraio': '02', 'marzo': '03', 'aprile': '04',
+        'maggio': '05', 'giugno': '06', 'luglio': '07', 'agosto': '08',
+        'settembre': '09', 'ottobre': '10', 'novembre': '11', 'dicembre': '12',
+    }
+    _RE_BDAY_MONTH = re.compile(
+        r'(?:sono\s+nat[oa]|compleanno|nato|nata)'
+        r'[^\d]{0,20}(\d{1,2})\s+'
+        r'(' + '|'.join(_MONTHS_IT) + r')'
+        r'(?:\s+(?:del\s+)?(\d{4}))?', re.IGNORECASE)
+
+    def _extract_birthday(self, text):
+        """Estrae data di nascita (dd/mm/yyyy numerico o '8 settembre 1998')."""
+        match = self._RE_BDAY_NUM.search(text)
+        if match:
+            d, m, y = match.group(1).zfill(2), match.group(2).zfill(2), match.group(3)
+            self._set_kv('birthday', f"{d}/{m}/{y}")
+            return
+        match = self._RE_BDAY_MONTH.search(text)
+        if match:
+            d = match.group(1).zfill(2)
+            m = self._MONTHS_IT.get(match.group(2).lower(), '00')
+            y = match.group(3) or ''
+            self._set_kv('birthday', f"{d}/{m}/{y}" if y else f"{d}/{m}")
+
+    # Trigger compilati — un solo regex per categoria (più veloci di N `in`)
+    _TRG_NAME  = re.compile(r'mi chiamo|(?:io\s+)?sono\s+\w|chiamami|mi presento|mi faccio chiamare', re.I)
+    _TRG_AGE   = re.compile(r'(?:ho|compio|compir\u00f2)\s+\d+\s+anni', re.I)
+    _TRG_BDAY  = re.compile(r'nat[oa]|compleanno', re.I)
+    _TRG_SEX   = re.compile(r'maschio|femmina|(?:sono\s+un\s+)uomo|donna|ragazzo|ragazza|genere|sesso', re.I)
+    _TRG_JOB   = re.compile(r'lavor|faccio\s+(?:il|la|lo)|professione|mestiere|occupazione|impiego|studio\b|student', re.I)
+    _TRG_INT   = re.compile(r'interessa|piace|piaccion|passione', re.I)
+    _TRG_PASS  = re.compile(r'passione|appassionat|adoro|amo\s+fare', re.I)
+    _TRG_PERS  = re.compile(
+        r'personalit|carattere|sono una persona|mi (?:considero|definisco|reputo)'
+        r'|introverso|estroverso|timid|socievole|creativ|curios'
+        r'|ottimista|pessimista|paziente|impaziente|emotiv|empatic', re.I)
+    _TRG_HEAL  = re.compile(r'salute|malattia|allergi|soffro|diagnos|disturbo|disabilit|intolleran', re.I)
+    _TRG_PHYS  = re.compile(r'alt[oa]\b|peso\b|capelli|occhi|corporatura|altezza|fisico\b', re.I)
+    _TRG_FAM   = re.compile(
+        r'sposat|fidanzat|single|separat|divorziat|vedov|figli'
+        r'|fratell|sorell|marito|moglie|partner|compagn|celibe|nubile|convivente', re.I)
+    _TRG_GOAL  = re.compile(
+        r'ob[bi]iettivo|sogno\b|vorrei|voglio|mio goal|traguardo'
+        r'|aspirazione|ambizione|progetto di vita', re.I)
+
+    def extract_personal_info(self, text):
+        """Estrae informazioni personali da un messaggio utente.
+
+        Campi estratti: nome, età, compleanno, sesso, interessi, passioni,
+        lavoro, personalità, salute, caratteristiche fisiche, famiglia, obiettivi.
+        Chiamato in tempo reale ad ogni messaggio (non ogni 5).
+        """
+        if self._TRG_NAME.search(text):
+            self._extract_user_name(text)
+        if self._TRG_INT.search(text):
+            self._extract_interests(text)
+        if self._TRG_AGE.search(text):
+            self._extract_age(text)
+        if self._TRG_BDAY.search(text):
+            self._extract_birthday(text)
+        if self._TRG_SEX.search(text):
+            self._extract_gender(text)
+        if self._TRG_JOB.search(text):
+            self._extract_job(text)
+        if self._TRG_PASS.search(text):
+            self._extract_passions(text)
+        if self._TRG_PERS.search(text):
+            self._extract_personality(text)
+        if self._TRG_HEAL.search(text):
+            self._extract_health(text)
+        if self._TRG_PHYS.search(text):
+            self._extract_physical(text)
+        if self._TRG_FAM.search(text):
+            self._extract_family(text)
+        if self._TRG_GOAL.search(text):
+            self._extract_goals(text)
 
     def _extract_interests(self, text):
         text_lower = text.lower()
         triggers = [
-            ('mi interessa', 'mi interessa'),
-            ('mi piace', 'mi piace'),
-            ('la mia passione', 'la mia passione'),
-            ('sono appassionato di', 'sono appassionato di'),
+            'mi interessa ', 'mi interessano ',
+            'mi piace ', 'mi piacciono ',
+            'la mia passione \u00e8 ', 'la mia passione e ',
+            'sono appassionato di ', 'sono appassionata di ',
         ]
         current = json.loads(self._get_kv('interests', '[]'))
         changed = False
-        for trigger, split_on in triggers:
+        for trigger in triggers:
             if trigger in text_lower:
-                after = text_lower.split(split_on, 1)[1].split('.')[0]
-                interest = after.strip()
-                if interest and interest not in current:
-                    current.append(interest)
-                    changed = True
+                raw = text_lower.split(trigger, 1)[1].split('.')[0].strip()
+                parts = re.split(r'\s+e\s+|,\s*', raw)
+                for part in parts:
+                    part = self._strip_articles(part)
+                    if part and len(part) > 2 and part not in current:
+                        current.append(part)
+                        changed = True
         if changed:
             self._set_kv('interests',
                          json.dumps(current, ensure_ascii=False))
+
+    def _extract_gender(self, text):
+        """Estrae il sesso/genere da frasi come 'sono un maschio', 'sono una ragazza'."""
+        t = text.lower()
+        male_kw = ('maschio', 'uomo', 'ragazzo', 'maschile')
+        female_kw = ('femmina', 'donna', 'ragazza', 'femminile')
+        if any(w in t for w in male_kw):
+            self._set_kv('gender', 'maschio')
+        elif any(w in t for w in female_kw):
+            self._set_kv('gender', 'femmina')
+
+    def _extract_job(self, text):
+        """Estrae lavoro/professione."""
+        patterns = [
+            r'(?:faccio|sono)\s+(?:il|la|lo|l\')\s*(.+?)(?:[,.]|$)',
+            r'lavoro\s+(?:come|da)\s+(.+?)(?:[,.]|$)',
+            r'(?:la\s+mia\s+)?professione\s+[eè]\s+(.+?)(?:[,.]|$)',
+            r'(?:di\s+)?(?:mestiere|occupazione)\s+(?:faccio|sono)\s+(.+?)(?:[,.]|$)',
+            r'sono\s+(?:uno|una)\s+(.+?)(?:[,.]|$)',
+            r'studio\s+(.+?)(?:[,.]|$)',
+            r'sono\s+student[ei]?\w*\s+(?:di|in)\s+(.+?)(?:[,.]|$)',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                job = match.group(1).strip()
+                # Filtra match troppo generici
+                if job and len(job) > 2 and len(job) < 80:
+                    skip = ('un maschio', 'una femmina', 'un uomo', 'una donna',
+                            'nato', 'nata', 'qui', 'jacopo', 'pronto', 'contento')
+                    if not any(s in job.lower() for s in skip):
+                        self._set_kv('job', job)
+                        return
+
+    def _extract_passions(self, text):
+        """Estrae passioni (lista, simile a interessi ma più forte)."""
+        patterns = [
+            r'(?:la\s+mia\s+passione\s+[eè]|le\s+mie\s+passioni\s+sono)\s+(.+?)(?:[.]|$)',
+            r'(?:sono\s+appassionat[oa]\s+di)\s+(.+?)(?:[,.]|$)',
+            r'adoro\s+(.+?)(?:[,.]|$)',
+            r'amo\s+fare\s+(.+?)(?:[,.]|$)',
+        ]
+        current = json.loads(self._get_kv('passions', '[]'))
+        changed = False
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                raw = match.group(1).strip().lower()
+                # Split su "e" / virgola per separare passioni multiple
+                parts = re.split(r'\s+e\s+|,\s*', raw)
+                for passion in parts:
+                    passion = re.sub(r'^(?:il|la|lo|le|i|gli|l[\'\u2019])\s*', '', passion).strip()
+                    if passion and len(passion) > 2 and passion not in current:
+                        current.append(passion)
+                        changed = True
+        if changed:
+            self._set_kv('passions', json.dumps(current, ensure_ascii=False))
+
+    # Tratti personalità normalizzati (maschile singolare)
+    _PERS_NORM = {
+        'timida': 'timido', 'calma': 'calmo', 'ansiosa': 'ansioso',
+        'creativa': 'creativo', 'curiosa': 'curioso',
+        'emotiva': 'emotivo', 'empatica': 'empatico',
+        'ambiziosa': 'ambizioso', 'determinata': 'determinato',
+        'pigra': 'pigro', 'riservata': 'riservato',
+        'lunatica': 'lunatico', 'generosa': 'generoso',
+        'energica': 'energico', 'testarda': 'testardo',
+        'orgogliosa': 'orgoglioso', 'sincera': 'sincero',
+        'ironica': 'ironico', 'sarcastica': 'sarcastico',
+    }
+    _PERS_KW = frozenset({
+        'introverso', 'estroverso', 'timido', 'timida', 'socievole',
+        'ansioso', 'ansiosa', 'calmo', 'calma', 'paziente', 'impaziente',
+        'ottimista', 'pessimista', 'creativo', 'creativa', 'razionale',
+        'emotivo', 'emotiva', 'empatico', 'empatica', 'ambizioso',
+        'ambiziosa', 'determinato', 'determinata', 'pigro', 'pigra',
+        'perfezionista', 'curioso', 'curiosa', 'riservato', 'riservata',
+        'solare', 'lunatico', 'lunatica', 'generoso', 'generosa',
+        'energico', 'energica', 'disponibile', 'testardo', 'testarda',
+        'sensibile', 'orgoglioso', 'orgogliosa', 'leale', 'sincero',
+        'sincera', 'ironico', 'ironica', 'sarcastico', 'sarcastica',
+    })
+    _RE_PERS_PHRASE = re.compile(
+        r'(?:mi\s+(?:considero|definisco|reputo)|sono\s+(?:una?\s+)?persona)'
+        r'\s+(?:molto\s+|abbastanza\s+|piuttosto\s+)?(\w+(?:\s+e\s+\w+)*)', re.I)
+
+    def _extract_personality(self, text):
+        """Estrae tratti di personalità (lista, normalizzati al maschile)."""
+        current = json.loads(self._get_kv('personality', '[]'))
+        changed = False
+        words = set(re.findall(r'\w+', text.lower()))
+        for kw in words & self._PERS_KW:
+            norm = self._PERS_NORM.get(kw, kw)
+            if norm not in current:
+                current.append(norm)
+                changed = True
+        # Frasi "mi considero / mi definisco / sono una persona..."
+        match = self._RE_PERS_PHRASE.search(text)
+        if match:
+            parts = [p.strip() for p in re.split(r'\s+e\s+', match.group(1).lower())]
+            for desc in parts:
+                norm = self._PERS_NORM.get(desc, desc)
+                if norm and len(norm) > 2 and len(norm) < 60 and norm not in current:
+                    current.append(norm)
+                    changed = True
+        if changed:
+            self._set_kv('personality', json.dumps(current, ensure_ascii=False))
+
+    _RE_HEALTH = [
+        re.compile(r'soffro\s+di\s+(.+?)(?:[,.]|$)', re.I),
+        re.compile(r'(?:ho|sono\s+affett[oa]\s+da)\s+(?:un[oa]?\s+)?(.+?)(?:[,.]|$)', re.I),
+        re.compile(r'mi\s+hanno\s+diagnosticato\s+(.+?)(?:[,.]|$)', re.I),
+        re.compile(r'(?:sono\s+)?allergic[oa]\s+(?:all[\'\u2019]\s*|alle|alla|al|ai|a)\s*(.+?)(?:[,.]|$)', re.I),
+        re.compile(r'(?:sono\s+)?intollerante\s+(?:all[\'\u2019]\s*|alle|alla|al|ai|a)\s*(.+?)(?:[,.]|$)', re.I),
+    ]
+
+    def _extract_health(self, text):
+        """Estrae informazioni sulla salute (lista)."""
+        current = json.loads(self._get_kv('health', '[]'))
+        changed = False
+        for rx in self._RE_HEALTH:
+            match = rx.search(text)
+            if match:
+                info = match.group(1).strip().lower()
+                if info and 3 < len(info) < 80:
+                    if not any(info in c or c in info for c in current):
+                        current.append(info)
+                        changed = True
+        if changed:
+            self._set_kv('health', json.dumps(current, ensure_ascii=False))
+
+    def _extract_physical(self, text):
+        """Estrae caratteristiche fisiche (lista, pre-compiled patterns)."""
+        traits = []
+        for cat, rx in self._RE_PHYSICAL.items():
+            m = rx.search(text)
+            if m:
+                val = m.group(1)
+                if cat == 'peso':
+                    traits.append(f"peso: {val} kg")
+                elif cat in ('capelli', 'occhi', 'corporatura'):
+                    traits.append(f"{cat}: {val.lower()}")
+                else:  # altezza
+                    traits.append(f"altezza: {val}")
+        if traits:
+            current = json.loads(self._get_kv('physical', '[]'))
+            for t in traits:
+                cat = t.split(':')[0]
+                current = [c for c in current if not c.startswith(cat + ':')]
+                current.append(t)
+            self._set_kv('physical', json.dumps(current, ensure_ascii=False))
+
+    _RE_FAMILY_MEMBER = re.compile(
+        r'(?:ho|(?:il\s+)?mi[oa])\s+'
+        r'(fratello|sorella|marito|moglie|partner|compagn[oa]|padre|madre|pap\u00e0|mamma)'
+        r'(?:\s+(?:si\s+chiama\s+|che\s+si\s+chiama\s+)?(\w+))?', re.I)
+
+    def _extract_family(self, text):
+        """Estrae stato di famiglia."""
+        statuses = {
+            'sposato': 'sposato', 'sposata': 'sposata',
+            'fidanzato': 'fidanzato', 'fidanzata': 'fidanzata',
+            'single': 'single', 'celibe': 'celibe', 'nubile': 'nubile',
+            'separato': 'separato', 'separata': 'separata',
+            'divorziato': 'divorziato', 'divorziata': 'divorziata',
+            'vedovo': 'vedovo', 'vedova': 'vedova',
+            'convivente': 'convivente',
+        }
+        t_lower = text.lower()
+        for kw, status in statuses.items():
+            if kw in t_lower:
+                self._set_kv('family_status', status)
+                break
+
+        # Figli — numeri e parole
+        m = self._RE_CHILDREN.search(text)
+        if m:
+            self._set_kv('children', m.group(1) or '1')
+        else:
+            m = self._RE_CHILDREN_WORD.search(text)
+            if m:
+                self._set_kv('children', self._NUMERI_IT.get(m.group(1).lower(), '0'))
+            elif 'non ho figli' in t_lower or 'senza figli' in t_lower:
+                self._set_kv('children', '0')
+
+        # Relazioni familiari
+        match = self._RE_FAMILY_MEMBER.search(text)
+        if match:
+            family_items = json.loads(self._get_kv('family_details', '[]'))
+            relation = match.group(1).lower()
+            name = match.group(2) or ''
+            entry = f"{relation}: {name}" if name else relation
+            if entry not in family_items:
+                family_items.append(entry)
+                self._set_kv('family_details',
+                             json.dumps(family_items, ensure_ascii=False))
+
+    _RE_GOALS = [
+        re.compile(r'(?:il\s+mio\s+)?(?:ob[bi]iettivo|sogno|traguardo|aspirazione|ambizione)\s+[eè]\s+(.+?)(?:[,.]|$)', re.I),
+        re.compile(r'vorrei\s+(?:tanto\s+|poter\s+)?(.{8,}?)(?:[,.]|$)', re.I),
+        re.compile(r'voglio\s+(.{8,}?)(?:[,.]|$)', re.I),
+        re.compile(r'(?:il\s+)?mio\s+goal\s+[eè]\s+(.+?)(?:[,.]|$)', re.I),
+        re.compile(r'(?:il\s+mio\s+)?progetto\s+di\s+vita\s+[eè]\s+(.+?)(?:[,.]|$)', re.I),
+        re.compile(r'punto\s+a\s+(.{8,}?)(?:[,.]|$)', re.I),
+        re.compile(r'spero\s+di\s+(.{8,}?)(?:[,.]|$)', re.I),
+    ]
+
+    def _extract_goals(self, text):
+        """Estrae obiettivi personali (lista)."""
+        current = json.loads(self._get_kv('goals', '[]'))
+        changed = False
+        for rx in self._RE_GOALS:
+            match = rx.search(text)
+            if match:
+                goal = match.group(1).strip()
+                if goal and 3 < len(goal) < 120:
+                    if goal.lower() not in {g.lower() for g in current}:
+                        current.append(goal)
+                        changed = True
+        if changed:
+            self._set_kv('goals', json.dumps(current, ensure_ascii=False))
 
     def _count_topics(self, text):
         topic_map = {
@@ -616,9 +997,46 @@ class KnowledgeBase:
         name = self._get_kv('name')
         if name:
             context_parts.append(f"Nome utente: {name}")
+        age = self._get_kv('age')
+        if age:
+            context_parts.append(f"Et\u00e0: {age} anni")
+        birthday = self._get_kv('birthday')
+        if birthday:
+            context_parts.append(f"Data di nascita: {birthday}")
+        gender = self._get_kv('gender')
+        if gender:
+            context_parts.append(f"Sesso: {gender}")
+        job = self._get_kv('job')
+        if job:
+            context_parts.append(f"Lavoro: {job}")
+        passions = json.loads(self._get_kv('passions', '[]'))
+        if passions:
+            context_parts.append(f"Passioni: {', '.join(passions[:5])}")
+        personality = json.loads(self._get_kv('personality', '[]'))
+        if personality:
+            context_parts.append(f"Personalit\u00e0: {', '.join(personality[:5])}")
+        health = json.loads(self._get_kv('health', '[]'))
+        if health:
+            context_parts.append(f"Salute: {', '.join(health[:5])}")
+        physical = json.loads(self._get_kv('physical', '[]'))
+        if physical:
+            context_parts.append(f"Caratteristiche fisiche: {', '.join(physical[:5])}")
+        family_status = self._get_kv('family_status')
+        if family_status:
+            children = self._get_kv('children')
+            fam_str = family_status
+            if children:
+                fam_str += f", {children} figli" if children != '1' else ", 1 figlio"
+            context_parts.append(f"Stato famiglia: {fam_str}")
+        family_details = json.loads(self._get_kv('family_details', '[]'))
+        if family_details:
+            context_parts.append(f"Familiari: {', '.join(family_details[:5])}")
+        goals = json.loads(self._get_kv('goals', '[]'))
+        if goals:
+            context_parts.append(f"Obiettivi: {'; '.join(goals[:3])}")
         interests = json.loads(self._get_kv('interests', '[]'))
         if interests:
-            context_parts.append(f"Interessi: {', '.join(interests[:3])}")
+            context_parts.append(f"Interessi: {', '.join(interests[:5])}")
         topics = self._get_topics()
         if topics:
             top = sorted(topics.items(), key=lambda x: x[1],
@@ -710,11 +1128,12 @@ class AdvancedMemory(ConversationMemory):
             # Estrai entitÃ  dai messaggi utente
             if role == 'user':
                 self.entity_tracker.extract_and_save(content, role)
+                # Estrai info personali in tempo reale (nome, et\u00e0, compleanno, interessi)
+                self.knowledge_base.extract_personal_info(content)
             
-            # Aggiorna knowledge base periodicamente
+            # Aggiorna knowledge base periodicamente (topic counting)
             conversation = self.load_conversation(conv_id)
             if conversation and len(conversation['messages']) % 5 == 0:
-                # Ogni 5 messaggi aggiorna la knowledge base
                 self.knowledge_base.update_from_conversation(conversation['messages'])
         
         return success
@@ -819,7 +1238,7 @@ class AdvancedMemory(ConversationMemory):
                 summary_lines.append(f"   \u2022 {topic}: {count} volte")
 
         # Facts
-        facts_count = stats.get('facts_count', 0)
+        facts_count = stats.get('facts', 0)
         if facts_count:
             summary_lines.append(f"\n\U0001f9e0 Fatti memorizzati: {facts_count}")
 

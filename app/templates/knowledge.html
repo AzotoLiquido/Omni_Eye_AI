@@ -3,11 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Omni Eye AI - Knowledge Base: visualizza e gestisci la conoscenza appresa dall'AI.">
     <title>Knowledge Base - Omni Eye AI</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>👁️</text></svg>">
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='knowledge.css') }}">
 </head>
 <body>
+    <noscript><p style="padding:2rem;color:#ff6b6b;text-align:center;">JavaScript è necessario per Omni Eye AI.</p></noscript>
     <main class="kb-container">
         <a href="/" class="back-link">← Torna alla Chat</a>
         
@@ -49,6 +52,15 @@
                     <div id="entities"></div>
                 </div>
             </div>
+
+            <!-- Knowledge Facts Stats -->
+            <div class="kb-card">
+                <h2>
+                    <span class="kb-card-icon">🧠</span>
+                    Fatti Appresi
+                </h2>
+                <div id="factsStats"></div>
+            </div>
             
             <!-- Summary Card -->
             <div class="kb-card">
@@ -59,6 +71,21 @@
                 <pre id="summary"></pre>
             </div>
             
+            <!-- Knowledge Packs -->
+            <div class="kb-card">
+                <h2>
+                    <span class="kb-card-icon">📦</span>
+                    Knowledge Packs
+                </h2>
+                <p style="margin-bottom: 1rem; color: var(--text-secondary);">Installa pacchetti di conoscenza per arricchire il database.</p>
+                <div id="packsContainer">
+                    <p style="color: var(--text-secondary);">Caricamento pack...</p>
+                </div>
+                <div style="margin-top: 1rem;">
+                    <button class="btn" id="installAllPacksBtn">📥 Installa Tutti</button>
+                </div>
+            </div>
+
             <!-- Search Card -->
             <div class="kb-card">
                 <h2>
@@ -69,7 +96,7 @@
                     type="text" 
                     id="searchInput" 
                     class="search-box" 
-                    placeholder="Cerca informazioni, topic, persone..."
+                    placeholder="Cerca fatti, informazioni, topic, persone..."
                 >
                 <button class="btn" id="searchBtn">Cerca</button>
                 <div id="searchResults" style="margin-top: 1rem;"></div>

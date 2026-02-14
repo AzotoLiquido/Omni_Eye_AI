@@ -8,10 +8,10 @@
   },
   "runtime": {
     "engine": "ollama",
-    "model_id": "dolphin-llama3:latest",
+    "model_id": "gemma3:4b",
     "temperature": 0.7,
     "max_tokens": 2048,
-    "context_window": 4096,
+    "context_window": 8192,
     "streaming": true
   },
   "persona": {

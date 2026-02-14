@@ -524,7 +524,7 @@ def build_memory_pipeline() -> Pipeline:
             return 0
 
         from core.advanced_memory import EntityTracker
-        tracker = EntityTracker()
+        tracker = EntityTracker(os.path.join("data", "entities.json"))
 
         processed = 0
         # Prendi le ultime 5 conversazioni

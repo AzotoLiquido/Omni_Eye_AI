@@ -52,6 +52,23 @@ class TestDetectRepetition(unittest.TestCase):
     def test_short_buffer_no_detection(self):
         self.assertFalse(_detect_repetition("ciao"))
 
+    def test_ngram_repetition_detected(self):
+        """N-gram ripetuti (loop semantico) devono essere rilevati."""
+        phrase = "il modello risponde con parole ripetute "
+        buf = "Testo iniziale normale. " + phrase * 5
+        self.assertTrue(_detect_repetition(buf))
+
+    def test_normal_long_text_no_false_positive(self):
+        """Testo lungo ma vario non deve triggerare."""
+        buf = (
+            "Python è un linguaggio di programmazione versatile. "
+            "JavaScript domina il web moderno con React e Vue. "
+            "Rust garantisce memory safety senza garbage collector. "
+            "Go utilizza goroutine per la concorrenza efficiente. "
+            "Java resta il linguaggio enterprise più diffuso al mondo. "
+        )
+        self.assertFalse(_detect_repetition(buf))
+
 
 class TestAIEngineBuildMessages(unittest.TestCase):
     """P1-1: verifica che _build_messages funzioni correttamente."""

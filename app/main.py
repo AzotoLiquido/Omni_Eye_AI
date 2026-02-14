@@ -292,16 +292,16 @@ def api_chat():
             pilot_extra += additional_context
         system_prompt = None  # Pilot costruisce il suo internamente
     else:
-        # Usa il prompt specializzato per codice se l'intent è CODE
+        # KV cache: system_prompt fisso PRIMA, contesto dinamico DOPO
         base_prompt = config.CODE_SYSTEM_PROMPT if _is_code_intent else config.SYSTEM_PROMPT
         system_prompt = base_prompt
         if identity_inject:
-            system_prompt = identity_inject + system_prompt
+            system_prompt += "\n" + identity_inject
         if additional_context:
-            system_prompt = additional_context + "\n" + system_prompt
+            system_prompt += "\n" + additional_context
         # Modalità "augmented": inietta contesto web nel system prompt
         if web_search_data_sync and web_search_data_sync["mode"] == "augmented":
-            system_prompt = web_search_data_sync["context"] + "\n\n" + system_prompt
+            system_prompt += "\n\n" + web_search_data_sync["context"]
     
     # Genera risposta
     try:
@@ -977,12 +977,7 @@ def api_knowledge_stats():
     """Statistiche dettagliate della KB."""
     kb = memory.knowledge_base
     count = kb.get_facts_count()
-    with kb._lock:
-        rows = kb._conn.execute(
-            "SELECT source, COUNT(*) as cnt FROM facts "
-            "GROUP BY source ORDER BY cnt DESC"
-        ).fetchall()
-    sources = {(r[0] or "(nessuna)"): r[1] for r in rows}
+    sources = kb.get_facts_by_source()
     return jsonify({
         'success': True,
         'total_facts': count,
