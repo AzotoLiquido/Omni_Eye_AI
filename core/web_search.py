@@ -13,6 +13,7 @@ Due modalità:
 import html
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional, Set
 from urllib.parse import quote_plus
 
@@ -175,11 +176,11 @@ _FACTUAL_FILLER = re.compile(
 )
 
 
-def _clean_query(message: str) -> str:
+def _clean_query(message: str, *, is_music: bool = False) -> str:
     """Rimuove parole filler dal messaggio per ottenere una query di ricerca pulita."""
     cleaned = _FILLER_WORDS.sub(" ", message)
     # Per query non musicali, rimuovi anche articoli e parole generiche
-    if not is_music_query(message):
+    if not is_music:
         cleaned = _FILLER_NON_MUSIC.sub(" ", cleaned)
     # Collassa spazi multipli
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
@@ -189,6 +190,22 @@ def _clean_query(message: str) -> str:
     return cleaned
 
 
+# Pre-compiled regex for music query cleaning (avoid re-compilation per call)
+_MUSIC_FILLER = re.compile(
+    r"\b(?:trovami|cercami|cercamelo|dammi|mostrami|apri|aprimi|"
+    r"trova|cerca|cercami|per favore|please|puoi|potresti|ascoltami|ascolta|play)\.?\b",
+    re.IGNORECASE,
+)
+_MUSIC_PLATFORM_FILLER = re.compile(
+    r"\bsu\s+(?:youtube|google|internet|web|spotify|deezer|soundcloud)\b",
+    re.IGNORECASE,
+)
+_MUSIC_LEADING_ARTICLES = re.compile(
+    r"^\s*(?:la|il|lo|una?|del(?:la)?|di)\s+",
+    re.IGNORECASE,
+)
+
+
 def _clean_music_query(message: str) -> str:
     """Pulisce una query musicale preservando artista + titolo.
 
@@ -196,20 +213,9 @@ def _clean_music_query(message: str) -> str:
     piattaforme (su youtube, su spotify) ma mantiene tutto ciò
     che identifica la canzone: titolo, artista, 'canzone', 'brano'.
     """
-    # Rimuovi verbi di ricerca
-    cleaned = re.sub(
-        r"\b(?:trovami|cercami|cercamelo|dammi|mostrami|apri|aprimi|"
-        r"trova|cerca|cercami|per favore|please|puoi|potresti|ascoltami|ascolta|play)\.?\b",
-        " ", message, flags=re.IGNORECASE,
-    )
-    # Rimuovi "su youtube/google/internet/web/spotify" (la piattaforma
-    # viene gestita dalla ricerca multi-piattaforma)
-    cleaned = re.sub(
-        r"\bsu\s+(?:youtube|google|internet|web|spotify|deezer|soundcloud)\b",
-        " ", cleaned, flags=re.IGNORECASE,
-    )
-    # Rimuovi preposizioni iniziali isolate
-    cleaned = re.sub(r"^\s*(?:la|il|lo|una?|del(?:la)?|di)\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = _MUSIC_FILLER.sub(" ", message)
+    cleaned = _MUSIC_PLATFORM_FILLER.sub(" ", cleaned)
+    cleaned = _MUSIC_LEADING_ARTICLES.sub("", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     if len(cleaned) < 3:
         return message.strip()
@@ -523,8 +529,9 @@ def search_and_format(message: str, max_results: int = 5) -> Optional[dict]:
         oppure None se non serve ricerca
     """
     from core.github_search import (
-        is_code_query, search_github, format_github_context,
-        format_github_user, clean_code_query, detect_language,
+        is_code_query, search_repositories, search_code,
+        format_github_context, format_github_user,
+        clean_code_query, detect_language,
     )
 
     explicit = needs_web_search(message)
@@ -541,52 +548,95 @@ def search_and_format(message: str, max_results: int = 5) -> Optional[dict]:
     if music and explicit:
         clean_q = _clean_music_query(message)
     elif explicit:
-        clean_q = _clean_query(message)
+        clean_q = _clean_query(message, is_music=music)
     else:
         clean_q = _clean_factual_query(message)
 
-    # ── GitHub search per query di codice ──────────────────────────────
+    # ── Lancia tutte le ricerche in parallelo ──────────────────────────
+    # Ogni sorgente (GitHub, Wikipedia, DuckDuckGo) è indipendente.
+    # ThreadPoolExecutor elimina l'attesa seriale (da ~4-6s a ~1-2s).
     github_data = None
-    if code and not music:
-        code_q = clean_code_query(message)
-        lang = detect_language(message)
-        github_data = search_github(code_q, max_results=max_results, language=lang)
+    wiki_extract = None
+    results = []
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {}
+
+        # GitHub (repos + code in parallelo)
+        if code and not music:
+            code_q = clean_code_query(message)
+            lang = detect_language(message)
+            futures["gh_repos"] = pool.submit(
+                search_repositories, code_q, max_results=max_results, language=lang,
+            )
+            futures["gh_code"] = pool.submit(
+                search_code, code_q, max_results=3, language=lang,
+            )
+
+        # Wikipedia + DuckDuckGo in parallelo per domande fattuali
+        if factual and not youtube and not music:
+            futures["wiki"] = pool.submit(_fetch_wikipedia_extract, clean_q)
+            futures["ddg"] = pool.submit(
+                web_search, clean_q, max_results=max_results, region="it-it",
+            )
+        elif music:
+            # YouTube e generale in parallelo
+            futures["yt"] = pool.submit(
+                web_search, clean_q, max_results=2, youtube=True,
+            )
+            futures["music_general"] = pool.submit(
+                web_search, clean_q, max_results=max_results, music=True,
+            )
+        elif explicit or factual:
+            futures["ddg"] = pool.submit(
+                web_search, clean_q, max_results=max_results, youtube=youtube,
+            )
+
+        # Raccogli risultati
+        for key, fut in futures.items():
+            try:
+                val = fut.result(timeout=12)
+            except Exception as e:
+                logger.warning("Ricerca '%s' fallita: %s", key, e)
+                val = None
+
+            if key == "gh_repos":
+                if github_data is None:
+                    github_data = {"repos": [], "code": []}
+                github_data["repos"] = val or []
+            elif key == "gh_code":
+                if github_data is None:
+                    github_data = {"repos": [], "code": []}
+                github_data["code"] = val or []
+            elif key == "wiki":
+                wiki_extract = val
+            elif key == "ddg":
+                results = val or []
+            elif key == "yt":
+                results.extend(val or [])
+            elif key == "music_general":
+                # Merge senza duplicati
+                seen = {r.get("url") for r in results if r.get("url")}
+                for r in (val or []):
+                    url = r.get("url", "")
+                    if url and url not in seen:
+                        seen.add(url)
+                        results.append(r)
+
+    # Fallback DuckDuckGo se prima ricerca vuota (regione diversa)
+    if factual and not youtube and not music and not results:
+        results = web_search(clean_q, max_results=max_results)
+
+    # Post-processing musicale
+    if music and results:
+        results = _sort_music_results(results)
+        results = results[:max_results]
+
+    if github_data:
         logger.info("GitHub search: repos=%d code=%d per '%s'",
                      len(github_data.get("repos", [])),
                      len(github_data.get("code", [])),
-                     code_q[:60])
-
-    # Per domande fattuali: prova prima Wikipedia API per contenuto ricco,
-    # poi DuckDuckGo come fallback per snippet aggiuntivi.
-    wiki_extract = None
-    results = []
-    if factual and not youtube and not music:
-        wiki_extract = _fetch_wikipedia_extract(clean_q)
-        results = web_search(clean_q, max_results=max_results, region="it-it")
-        if not results:
-            results = web_search(clean_q, max_results=max_results)
-    elif music:
-        # Ricerca musicale multi-piattaforma:
-        # 1. YouTube (max 2 risultati) per il video
-        # 2. Generale senza YouTube per piattaforme diverse (Spotify, Genius...)
-        yt_results = web_search(
-            clean_q, max_results=2, youtube=True,
-        )
-        general_results = web_search(
-            clean_q, max_results=max_results, music=True,
-        )
-        # Unisci senza duplicati (stesso URL)
-        seen_urls: set = set()
-        for r in yt_results + general_results:
-            url = r.get("url", "")
-            if url and url not in seen_urls:
-                seen_urls.add(url)
-                results.append(r)
-        # Ordina per rilevanza musicale
-        results = _sort_music_results(results)
-        results = results[:max_results]
-    elif explicit or factual:
-        results = web_search(clean_q, max_results=max_results, youtube=youtube)
+                     clean_q[:60])
 
     # Se né web né GitHub hanno prodotto risultati, ritorna None
     has_github = github_data and (github_data.get("repos") or github_data.get("code"))

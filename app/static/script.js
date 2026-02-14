@@ -70,6 +70,8 @@ const elements = {
     imageThumb: document.getElementById('imageThumb'),
     imageName: document.getElementById('imageName'),
     imageRemove: document.getElementById('imageRemove'),
+    pipelineToggle: document.getElementById('pipelineToggle'),
+    pipelinePanel: document.getElementById('pipelinePanel'),
 };
 
 // ============================================================================
@@ -396,6 +398,75 @@ async function checkSystemStatus() {
 function setStatus(status, text) {
     elements.statusIndicator.className = `status-indicator ${status}`;
     elements.statusIndicator.querySelector('.status-text').textContent = text;
+}
+
+// ============================================================================
+// PIPELINE STATUS PANEL
+// Stato pipeline (manutenzione, memoria, ecc.)
+// ============================================================================
+
+const STATUS_ICONS = { success: '✓', failed: '✗', skipped: '⊘', pending: '…' };
+
+function togglePipelinePanel() {
+    const panel = elements.pipelinePanel;
+    const btn = elements.pipelineToggle;
+    const expanded = btn.getAttribute('aria-expanded') === 'true';
+    btn.setAttribute('aria-expanded', String(!expanded));
+    panel.hidden = expanded;
+    if (!expanded) refreshPipelinePanel();
+}
+
+async function refreshPipelinePanel() {
+    const panel = elements.pipelinePanel;
+    try {
+        const res = await fetch(`${API_BASE}/status`);
+        const data = await res.json();
+        const tasks = data.pipeline_scheduler;
+        if (!tasks || Object.keys(tasks).length === 0) {
+            panel.innerHTML = '<div class="pipeline-no-data">Nessuna pipeline registrata</div>';
+            return;
+        }
+        let html = '';
+        for (const [name, t] of Object.entries(tasks)) {
+            const ago = t.last_run > 0 ? formatTimeAgo(t.last_run) : 'mai';
+            html += `<div class="pipeline-task">
+                <div class="pipeline-task-header">
+                    <span class="pipeline-task-name">${escapeHtml(name)}</span>
+                    <span class="pipeline-task-runs">×${t.run_count}</span>
+                </div>`;
+            if (t.last_result) {
+                html += '<div class="pipeline-steps">';
+                for (const [step, status] of Object.entries(t.last_result)) {
+                    const icon = STATUS_ICONS[status] || '?';
+                    html += `<span class="pipeline-step" data-status="${status}">
+                        <span class="pipeline-step-icon">${icon}</span>${escapeHtml(step)}</span>`;
+                }
+                html += '</div>';
+            }
+            html += `<div class="pipeline-last-run">Ultimo run: ${ago}</div></div>`;
+        }
+        panel.innerHTML = html;
+    } catch {
+        panel.innerHTML = '<div class="pipeline-no-data">Errore caricamento stato</div>';
+    }
+}
+
+function formatTimeAgo(ts) {
+    const diff = Math.floor(Date.now() / 1000 - ts);
+    if (diff < 60) return `${diff}s fa`;
+    if (diff < 3600) return `${Math.floor(diff / 60)}min fa`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h fa`;
+    return `${Math.floor(diff / 86400)}g fa`;
+}
+
+function escapeHtml(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+}
+
+if (elements.pipelineToggle) {
+    elements.pipelineToggle.addEventListener('click', togglePipelinePanel);
 }
 
 // ============================================================================

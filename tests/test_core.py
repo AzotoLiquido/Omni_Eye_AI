@@ -335,10 +335,12 @@ class TestGenerateSummaryLimit(unittest.TestCase):
 
 class TestKnowledgeBase(unittest.TestCase):
     def setUp(self):
-        self.path = os.path.join(_TMPDIR, "data", "test_kb.json")
-        if os.path.exists(self.path):
-            os.remove(self.path)
+        self.path = os.path.join(_TMPDIR, "data", "test_kb_dir")
+        os.makedirs(self.path, exist_ok=True)
         self.kb = KnowledgeBase(self.path)
+
+    def tearDown(self):
+        self.kb.close()
 
     def test_extract_user_name(self):
         msgs = [{"role": "user", "content": "Mi chiamo Carlo e studio informatica"}]
@@ -362,10 +364,11 @@ class TestKnowledgeBase(unittest.TestCase):
         self.assertIn("programmazione", self.kb.knowledge["topics_discussed"])
 
     def test_persistence(self):
-        self.kb.knowledge["user_profile"]["name"] = "Test"
-        self.kb._save_knowledge()
+        self.kb._set_kv("name", "Test")
+        self.kb.close()
         kb2 = KnowledgeBase(self.path)
         self.assertEqual(kb2.knowledge["user_profile"]["name"], "Test")
+        kb2.close()
 
 
 class TestAdvancedMemory(unittest.TestCase):

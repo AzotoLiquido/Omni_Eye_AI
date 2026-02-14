@@ -24,6 +24,10 @@ from core.advanced_memory import AdvancedMemory
 from core.ai_pilot import Pilot
 from core.web_search import search_and_format
 from core.model_router import ModelRouter, ModelMapping, Intent, classify_intent
+from core.pipeline import (
+    PipelineScheduler, build_maintenance_pipeline,
+    build_document_pipeline, build_memory_pipeline,
+)
 from app.vision import (
     VISION_ONLY_TAGS, MULTILINGUAL_VISION, VISION_PRIORITY,
     VISION_SYSTEM_PROMPT, user_visible_models, vision_model_priority,
@@ -133,6 +137,23 @@ def _warmup_model():
 # Avvia warmup in background per non bloccare l'avvio del server
 threading.Thread(target=_warmup_model, daemon=True, name="model-warmup").start()
 
+# ── Pipeline Scheduler: manutenzione periodica in background ──────────────────
+pipeline_scheduler = PipelineScheduler()
+pipeline_scheduler.register(
+    "maintenance", build_maintenance_pipeline(),
+    interval_seconds=6 * 3600,   # ogni 6 ore
+    run_on_start=True,           # pulizia immediata all'avvio
+)
+pipeline_scheduler.register(
+    "memory_refresh", build_memory_pipeline(),
+    interval_seconds=30 * 60,    # ogni 30 minuti
+)
+pipeline_scheduler.start()
+logger.info("Pipeline Scheduler: avviato (maintenance=6h, memory=30min)")
+
+# Pipeline riutilizzabile per processing documenti
+_document_pipeline = build_document_pipeline()
+
 # Inizializza AI-Pilot (orchestratore avanzato)
 try:
     pilot = Pilot()
@@ -181,6 +202,7 @@ def api_status():
             'models': model_router.mapping.__dict__ if ROUTER_ENABLED and model_router else None,
             'warm_model': model_router.warm_model if ROUTER_ENABLED and model_router else None,
         },
+        'pipeline_scheduler': pipeline_scheduler.get_status(),
     })
 
 
@@ -791,12 +813,20 @@ def api_upload_document():
     # Ottieni info file
     file_info = doc_processor.get_file_info(filepath)
     
-    # Indicizza il documento nella memoria Pilot (se attivo)
+    # Indicizza il documento tramite pipeline asincrona (parse → chunk → index Pilot)
     if PILOT_ENABLED and pilot and text:
-        try:
-            pilot.add_document(filepath, text, tags=[file.filename])
-        except Exception:
-            pass  # Non critico, il documento rimane comunque accessibile
+        def _run_doc_pipeline():
+            try:
+                _document_pipeline.run(
+                    filepath=filepath,
+                    filename=file.filename,
+                    pilot=pilot,
+                )
+            except Exception as e:
+                logger.warning("Document pipeline fallita: %s", e)
+        threading.Thread(
+            target=_run_doc_pipeline, daemon=True, name="doc-pipeline",
+        ).start()
     
     return jsonify({
         'success': True,
@@ -898,6 +928,65 @@ def api_knowledge_search():
         'success': True,
         'query': query,
         'results': results
+    })
+
+
+# ── Knowledge Packs API ────────────────────────────────────────────────────
+
+@app.route('/api/knowledge/packs', methods=['GET'])
+@limiter.limit(config.RATE_LIMIT_CONFIG['limits']['default'])
+def api_knowledge_packs():
+    """Lista pack disponibili e statistiche KB."""
+    from core.knowledge_packs import get_available_packs
+    packs = get_available_packs()
+    return jsonify({
+        'success': True,
+        'packs': packs,
+        'total_packs': len(packs),
+        'total_facts_available': sum(p['facts_count'] for p in packs),
+        'facts_in_db': memory.knowledge_base.get_facts_count(),
+    })
+
+
+@app.route('/api/knowledge/packs/install', methods=['POST'])
+@limiter.limit(config.RATE_LIMIT_CONFIG['limits']['default'])
+def api_install_pack():
+    """Installa uno o tutti i pack. Body: {"pack": "nome"} o {"all": true}."""
+    from core.knowledge_packs import install_pack, install_all_packs
+    data = request.get_json(silent=True) or {}
+
+    try:
+        if data.get('all'):
+            result = install_all_packs(memory.knowledge_base)
+            return jsonify({'success': True, **result})
+        elif data.get('pack'):
+            result = install_pack(memory.knowledge_base, data['pack'])
+            return jsonify({'success': True, 'pack': data['pack'], **result})
+        else:
+            return jsonify({'error': 'Specificare "pack" o "all": true'}), 400
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 404
+    except Exception as e:
+        logger.error("Errore installazione pack: %s", e)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/knowledge/stats', methods=['GET'])
+@limiter.limit(config.RATE_LIMIT_CONFIG['limits']['default'])
+def api_knowledge_stats():
+    """Statistiche dettagliate della KB."""
+    kb = memory.knowledge_base
+    count = kb.get_facts_count()
+    with kb._lock:
+        rows = kb._conn.execute(
+            "SELECT source, COUNT(*) as cnt FROM facts "
+            "GROUP BY source ORDER BY cnt DESC"
+        ).fetchall()
+    sources = {(r[0] or "(nessuna)"): r[1] for r in rows}
+    return jsonify({
+        'success': True,
+        'total_facts': count,
+        'sources': sources,
     })
 
 

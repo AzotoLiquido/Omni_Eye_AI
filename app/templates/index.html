@@ -49,6 +49,12 @@
                 <a href="/knowledge" class="btn-knowledge" target="_blank" title="Visualizza Knowledge Base" aria-label="Apri Knowledge Base in nuova scheda">
                     🧠 Knowledge Base
                 </a>
+                <button id="pipelineToggle" class="btn-pipeline-toggle" aria-expanded="false" aria-controls="pipelinePanel" title="Stato pipeline">
+                    ⚙️ Pipeline <span class="pipeline-arrow">▸</span>
+                </button>
+                <div id="pipelinePanel" class="pipeline-panel" hidden>
+                    <div class="pipeline-loading">Caricamento…</div>
+                </div>
             </div>
         </aside>
         <button id="sidebarToggle" class="sidebar-toggle" title="Chiudi sidebar" aria-label="Chiudi/Apri barra laterale" aria-expanded="true">◀</button>

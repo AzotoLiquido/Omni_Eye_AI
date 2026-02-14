@@ -547,6 +547,157 @@ body {
     text-shadow: 0 0 8px rgba(92, 255, 138, 0.6);
 }
 
+/* Pipeline Panel */
+.btn-pipeline-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    width: 100%;
+    padding: 0.55rem 0.75rem;
+    margin-top: 0.6rem;
+    background: rgba(0, 0, 0, 0.25);
+    color: var(--ink-soft);
+    border: 1px solid var(--line);
+    border-radius: 0.5rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.25s ease;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.btn-pipeline-toggle:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: rgba(92, 255, 138, 0.08);
+    box-shadow: 0 0 10px rgba(92, 255, 138, 0.15);
+}
+
+.btn-pipeline-toggle[aria-expanded="true"] .pipeline-arrow {
+    transform: rotate(90deg);
+}
+
+.pipeline-arrow {
+    display: inline-block;
+    transition: transform 0.2s ease;
+    font-size: 0.7rem;
+}
+
+.pipeline-panel {
+    margin-top: 0.5rem;
+    padding: 0.6rem;
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid var(--line);
+    border-radius: 0.5rem;
+    max-height: 220px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line) transparent;
+}
+
+.pipeline-panel[hidden] {
+    display: none;
+}
+
+.pipeline-loading {
+    text-align: center;
+    color: var(--ink-soft);
+    font-size: 0.75rem;
+    padding: 0.5rem;
+}
+
+.pipeline-task {
+    margin-bottom: 0.5rem;
+    padding: 0.45rem 0.5rem;
+    border-radius: 0.4rem;
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid rgba(92, 255, 138, 0.1);
+}
+
+.pipeline-task:last-child {
+    margin-bottom: 0;
+}
+
+.pipeline-task-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.3rem;
+}
+
+.pipeline-task-name {
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.pipeline-task-runs {
+    font-size: 0.65rem;
+    color: var(--ink-soft);
+}
+
+.pipeline-steps {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+}
+
+.pipeline-step {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    padding: 0.15rem 0.4rem;
+    border-radius: 0.3rem;
+    font-size: 0.65rem;
+    font-weight: 600;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid rgba(92, 255, 138, 0.12);
+}
+
+.pipeline-step[data-status="success"] {
+    color: var(--success);
+    border-color: rgba(16, 185, 129, 0.3);
+}
+
+.pipeline-step[data-status="failed"] {
+    color: var(--danger);
+    border-color: rgba(239, 68, 68, 0.3);
+}
+
+.pipeline-step[data-status="skipped"] {
+    color: var(--warning);
+    border-color: rgba(245, 158, 11, 0.3);
+}
+
+.pipeline-step[data-status="pending"] {
+    color: var(--ink-soft);
+    opacity: 0.6;
+}
+
+.pipeline-step-icon {
+    font-size: 0.6rem;
+}
+
+.pipeline-last-run {
+    font-size: 0.6rem;
+    color: var(--ink-soft);
+    opacity: 0.7;
+    margin-top: 0.25rem;
+}
+
+.pipeline-no-data {
+    text-align: center;
+    color: var(--ink-soft);
+    font-size: 0.72rem;
+    padding: 0.5rem;
+    opacity: 0.7;
+}
+
 /* Chat Area */
 .chat-area {
     flex: 1;
