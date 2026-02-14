@@ -8,17 +8,18 @@ from typing import Any, Dict, Optional
 from pathlib import Path
 
 # Directory contenente i JSON di configurazione
-# Usa la directory del modulo stesso (su Windows AI-Pilot e ai_pilot sono lo stesso path)
+# _CODE_DIR = cartella del codice sorgente (core/ai_pilot/)
+# _CFG_DIR  = cartella di configurazione (core/pilot_config/)
 _CODE_DIR = Path(__file__).resolve().parent
-_ALT_DIR = _CODE_DIR.parent / "AI-Pilot"
+_CFG_DIR = _CODE_DIR.parent / "pilot_config"
 
 # P1-11: Verify file actually exists in fallback directory
-if (_CODE_DIR / "assistant.config.json").exists():
+if (_CFG_DIR / "assistant.config.json").exists():
+    CONFIG_DIR = _CFG_DIR
+elif (_CODE_DIR / "assistant.config.json").exists():
     CONFIG_DIR = _CODE_DIR
-elif (_ALT_DIR / "assistant.config.json").exists():
-    CONFIG_DIR = _ALT_DIR
 else:
-    CONFIG_DIR = _CODE_DIR  # Will raise FileNotFoundError later
+    CONFIG_DIR = _CFG_DIR  # Will raise FileNotFoundError later
 
 SCHEMA_PATH = CONFIG_DIR / "assistant.schema.json"
 CONFIG_PATH = CONFIG_DIR / "assistant.config.json"
@@ -212,7 +213,12 @@ class PilotConfig:
 
     @property
     def formatting(self) -> Dict:
-        return self._raw["persona"].get("style", {}).get("formatting", {})
+        fmt = self._raw["persona"].get("style", {}).get("formatting", {})
+        # Defaults: code fences, liste e tabelle attivi se non specificato
+        fmt.setdefault("code_fences", True)
+        fmt.setdefault("use_lists", True)
+        fmt.setdefault("use_tables", True)
+        return fmt
 
     @property
     def primary_language(self) -> str:

@@ -15,8 +15,8 @@
     "streaming": true
   },
   "persona": {
-    "tone": "friendly",
-    "verbosity": "normal",
+    "tone": "neutro",
+    "verbosity": 7,
     "language": "it",
     "fallback_language": "en",
     "custom_instructions": "Sei Omni Eye AI, un assistente intelligente e versatile. Rispondi in modo chiaro e utile."

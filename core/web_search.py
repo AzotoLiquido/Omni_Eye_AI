@@ -42,9 +42,41 @@ _SEARCH_PATTERNS = re.compile(
 
 # Pattern per richieste specifiche YouTube
 _YOUTUBE_PATTERN = re.compile(
-    r"youtube|video\s+(?:di|della?|su)|canzone|musica|brano|song|music|watch",
+    r"youtube|video\s+(?:di|della?|su)",
     re.IGNORECASE,
 )
+
+# ── Pattern per richieste MUSICALI ──────────────────────────────────────
+_MUSIC_PATTERN = re.compile(
+    r"(?:"
+    r"canzon[ei]|brano|brani|musica|song|music|track|album|testo|lyric[s]?"
+    r"|ascolta(?:re|mi)?|play|senti(?:re|mi)?"
+    r"|spotify|soundcloud|apple\s*music|deezer|tidal|shazam"
+    r"|concert[oi]|tour|live"
+    r")",
+    re.IGNORECASE,
+)
+
+# Pattern secondario: "[titolo] dei/di/degli [artista]" — indica una canzone
+_SONG_ARTIST_HINT = re.compile(
+    r"\b(?:dei|degli|delle|di|by)\s+\w+(?:\s+\w+)*\s*$",
+    re.IGNORECASE,
+)
+
+# Termini che escludono una query musicale (notizie, meteo, informazioni, ecc.)
+_NON_MUSIC_TERMS = re.compile(
+    r"\b(?:notizi[ae]|meteo|prezz[oi]|informazion[ei]|politic[ao]|economi[ao]|"
+    r"sport|ricett[ae]|orari[oi]|risultat[oi]|classifica|dove|come\s+(?:si|fare)|"
+    r"perch[eé]|quand[oi]|quant[oiae]|cos['\u2019]|cosa|chi\s+(?:[eè]|ha)|"
+    r"libro|film|serie\s+tv|telefilm|ristorante|hotel|volo|treno|negozio)\b",
+    re.IGNORECASE,
+)
+
+# Piattaforme musicali per risultati multi-piattaforma
+_MUSIC_PLATFORMS = [
+    "youtube.com", "spotify.com", "genius.com", "apple.com/music",
+    "soundcloud.com", "deezer.com", "shazam.com",
+]
 
 # ── Pattern per domande FATTUALI che beneficiano di dati aggiornati ────
 # Nota: [eè] matcha sia "e" che "è" per gestire input senza accenti.
@@ -102,13 +134,36 @@ def is_youtube_query(message: str) -> bool:
     return bool(_YOUTUBE_PATTERN.search(message))
 
 
+def is_music_query(message: str) -> bool:
+    """Indica se la ricerca riguarda musica/canzoni.
+
+    Due livelli di rilevamento:
+    1. Parole chiave musicali esplicite (canzone, brano, ascolta, spotify, ecc.)
+    2. Euristica strutturale: "[titolo] dei/di [artista]" in query di ricerca,
+       purché non contenga termini chiaramente non musicali (notizie, meteo, ecc.)
+    """
+    if _MUSIC_PATTERN.search(message):
+        return True
+    # Euristica: ricerca esplicita + pattern "[titolo] di/dei [artista]"
+    if _SEARCH_PATTERNS.search(message) and not _NON_MUSIC_TERMS.search(message):
+        if _SONG_ARTIST_HINT.search(message):
+            return True
+    return False
+
+
 # Parole filler da rimuovere per pulire la query di ricerca
 _FILLER_WORDS = re.compile(
     r"\b(?:trovami|cercami|cercamelo|dammi|mostrami|apri|aprimi|"
     r"trova|cerca|cerca(?:re)?|per favore|please|puoi|potresti|"
-    r"il link|un link|il video|della canzone|canzone|brano|musica|song|music|"
-    r"di|del|della|dello|"
-    r"su|mi|me|la|le|lo|gli|un|una|dei|delle|degli)\b",
+    r"il link|un link|il video|"
+    r"su|mi|me)\.?\b",
+    re.IGNORECASE,
+)
+
+# Filler aggiuntivi SOLO per query NON musicali (non rimuovere 'canzone', 'brano' ecc. dalle query musicali)
+_FILLER_NON_MUSIC = re.compile(
+    r"\b(?:della canzone|canzone|brano|musica|song|music|"
+    r"di|del|della|dello|la|le|lo|gli|un|una|dei|delle|degli)\b",
     re.IGNORECASE,
 )
 
@@ -123,9 +178,39 @@ _FACTUAL_FILLER = re.compile(
 def _clean_query(message: str) -> str:
     """Rimuove parole filler dal messaggio per ottenere una query di ricerca pulita."""
     cleaned = _FILLER_WORDS.sub(" ", message)
+    # Per query non musicali, rimuovi anche articoli e parole generiche
+    if not is_music_query(message):
+        cleaned = _FILLER_NON_MUSIC.sub(" ", cleaned)
     # Collassa spazi multipli
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     # Se troppo corta dopo il cleaning, usa l'originale
+    if len(cleaned) < 3:
+        return message.strip()
+    return cleaned
+
+
+def _clean_music_query(message: str) -> str:
+    """Pulisce una query musicale preservando artista + titolo.
+
+    Rimuove solo le parole di ricerca (cercami, trovami...) e
+    piattaforme (su youtube, su spotify) ma mantiene tutto ciò
+    che identifica la canzone: titolo, artista, 'canzone', 'brano'.
+    """
+    # Rimuovi verbi di ricerca
+    cleaned = re.sub(
+        r"\b(?:trovami|cercami|cercamelo|dammi|mostrami|apri|aprimi|"
+        r"trova|cerca|cercami|per favore|please|puoi|potresti|ascoltami|ascolta|play)\.?\b",
+        " ", message, flags=re.IGNORECASE,
+    )
+    # Rimuovi "su youtube/google/internet/web/spotify" (la piattaforma
+    # viene gestita dalla ricerca multi-piattaforma)
+    cleaned = re.sub(
+        r"\bsu\s+(?:youtube|google|internet|web|spotify|deezer|soundcloud)\b",
+        " ", cleaned, flags=re.IGNORECASE,
+    )
+    # Rimuovi preposizioni iniziali isolate
+    cleaned = re.sub(r"^\s*(?:la|il|lo|una?|del(?:la)?|di)\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
     if len(cleaned) < 3:
         return message.strip()
     return cleaned
@@ -155,6 +240,7 @@ def web_search(
     max_results: int = 5,
     region: str = "it-it",
     youtube: bool = False,
+    music: bool = False,
 ) -> List[Dict[str, str]]:
     """
     Esegue una ricerca web via DuckDuckGo.
@@ -164,6 +250,7 @@ def web_search(
         max_results: Numero massimo di risultati (default 5)
         region: Regione per i risultati (default it-it)
         youtube: Se True, aggiunge "site:youtube.com" alla query
+        music: Se True, ottimizza per risultati musicali multi-piattaforma
 
     Returns:
         Lista di dict con chiavi: title, url, snippet
@@ -175,19 +262,28 @@ def web_search(
         logger.warning("ddgs non installato. Installa con: pip install ddgs")
         return []
 
-    # Per YouTube usare regione mondiale: evita che DuckDuckGo
-    # restituisca cover/traduzioni italiane invece dell'originale.
-    if youtube:
+    # Per YouTube e musica usare regione mondiale per risultati originali
+    if youtube or music:
         region = "wt-wt"
 
     search_query = query
     if youtube:
         search_query = f"site:youtube.com {query}"
+    elif music:
+        # Per musica: cerca senza site:youtube.com e filtra YouTube in Python
+        # (DuckDuckGo non supporta -site: in modo affidabile)
+        q_lower = query.lower()
+        has_music_term = any(
+            w in q_lower for w in ("canzone", "brano", "song", "music", "album", "testo", "lyrics")
+        )
+        search_query = f"{query} song" if not has_music_term else query
 
     try:
         results = []
         with DDGS() as ddgs:
-            for r in ddgs.text(search_query, region=region, max_results=max_results):
+            # Per musica, richiedi più risultati per poi selezionare i migliori
+            fetch_count = max_results * 2 if music else max_results
+            for r in ddgs.text(search_query, region=region, max_results=fetch_count):
                 snippet = html.unescape(r.get("body", ""))
                 # Filtra risultati con snippet spazzatura (pagine generiche YouTube, ecc.)
                 if _is_garbage_snippet(snippet):
@@ -197,11 +293,61 @@ def web_search(
                     "url": r.get("href", ""),
                     "snippet": snippet,
                 })
+
+        # Per musica: filtra YouTube in Python (già coperto dalla ricerca dedicata)
+        if music and results:
+            results = [r for r in results
+                       if not any(yt in r.get("url", "").lower()
+                                  for yt in ("youtube.com", "youtu.be"))]
+
+        # Per musica: ordina privilegiando piattaforme musicali e risultati rilevanti
+        if music and results:
+            results = _sort_music_results(results)
+            results = results[:max_results]
+
         logger.info("Web search: %d risultati per '%s'", len(results), search_query[:60])
         return results
     except Exception as e:
         logger.error("Errore web search: %s", e)
         return []
+
+
+def _sort_music_results(results: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Ordina i risultati musicali privilegiando piattaforme di streaming/musica.
+
+    Priorità: YouTube (video ufficiale) > Spotify > Genius (testi) > altre piattaforme > resto.
+    """
+    def _score(r: Dict[str, str]) -> int:
+        url = r.get("url", "").lower()
+        title = r.get("title", "").lower()
+        score = 0
+        # Piattaforme musicali (priorità massima)
+        if "youtube.com" in url or "youtu.be" in url:
+            score += 100
+            if "official" in title or "ufficiale" in title:
+                score += 50  # Video ufficiale in cima
+            if "music video" in title or "video musicale" in title:
+                score += 40
+        elif "spotify.com" in url:
+            score += 90
+        elif "genius.com" in url:
+            score += 80  # Testi
+        elif "apple.com/music" in url or "music.apple.com" in url:
+            score += 70
+        elif "soundcloud.com" in url:
+            score += 60
+        elif "shazam.com" in url:
+            score += 55
+        elif "deezer.com" in url:
+            score += 50
+        # Penalizza pagine wiki e fan pages
+        if "wikipedia.org" in url:
+            score -= 20
+        if "fandom.com" in url:
+            score -= 30
+        return score
+
+    return sorted(results, key=_score, reverse=True)
 
 
 def format_search_results(results: List[Dict[str, str]], query: str = "") -> str:
@@ -230,7 +376,11 @@ def format_search_results(results: List[Dict[str, str]], query: str = "") -> str
     return "\n".join(lines)
 
 
-def format_search_results_user(results: List[Dict[str, str]], query: str = "") -> str:
+def format_search_results_user(
+    results: List[Dict[str, str]],
+    query: str = "",
+    music: bool = False,
+) -> str:
     """
     Formatta i risultati come Markdown da mostrare direttamente all'utente.
     Gli URL sono reali e cliccabili.
@@ -243,16 +393,42 @@ def format_search_results_user(results: List[Dict[str, str]], query: str = "") -
         title = r.get("title", "Senza titolo")
         url = r.get("url", "")
         snippet = r.get("snippet", "")
+
+        # Icona per piattaforma (solo per ricerche musicali)
+        icon = ""
+        if music and url:
+            icon = _music_platform_icon(url)
+
         if url:
-            lines.append(f"{i}. [{title}]({url})")
+            lines.append(f"{i}. {icon}[{title}]({url})")
         else:
-            lines.append(f"{i}. {title}")
+            lines.append(f"{i}. {icon}{title}")
         if snippet:
             # Tronca snippet e rimuovi newline
             clean_snippet = snippet[:180].replace("\n", " ").strip()
             if clean_snippet:
                 lines.append(f"   {clean_snippet}")
     return "\n".join(lines)
+
+
+def _music_platform_icon(url: str) -> str:
+    """Restituisce un'icona emoji per la piattaforma musicale."""
+    u = url.lower()
+    if "youtube.com" in u or "youtu.be" in u:
+        return "▶️ "
+    if "spotify.com" in u:
+        return "🎧 "
+    if "genius.com" in u:
+        return "📝 "
+    if "apple.com/music" in u or "music.apple.com" in u:
+        return "🍎 "
+    if "soundcloud.com" in u:
+        return "☁️ "
+    if "deezer.com" in u:
+        return "🎵 "
+    if "shazam.com" in u:
+        return "🔍 "
+    return "🎵 "
 
 
 # ── Post-filtro: rimuove URL inventati e riferimenti falsi ─────────────
@@ -346,46 +522,116 @@ def search_and_format(message: str, max_results: int = 5) -> Optional[dict]:
             urls   — set di URL reali per il filtro post-risposta
         oppure None se non serve ricerca
     """
+    from core.github_search import (
+        is_code_query, search_github, format_github_context,
+        format_github_user, clean_code_query, detect_language,
+    )
+
     explicit = needs_web_search(message)
     factual = needs_factual_search(message)
+    code = is_code_query(message)
 
-    if not explicit and not factual:
+    if not explicit and not factual and not code:
         return None
 
     youtube = is_youtube_query(message) if explicit else False
-    clean_q = _clean_query(message) if explicit else _clean_factual_query(message)
+    music = is_music_query(message)
+
+    # Pulizia query: musica usa pulizia dedicata, altrimenti standard
+    if music and explicit:
+        clean_q = _clean_music_query(message)
+    elif explicit:
+        clean_q = _clean_query(message)
+    else:
+        clean_q = _clean_factual_query(message)
+
+    # ── GitHub search per query di codice ──────────────────────────────
+    github_data = None
+    if code and not music:
+        code_q = clean_code_query(message)
+        lang = detect_language(message)
+        github_data = search_github(code_q, max_results=max_results, language=lang)
+        logger.info("GitHub search: repos=%d code=%d per '%s'",
+                     len(github_data.get("repos", [])),
+                     len(github_data.get("code", [])),
+                     code_q[:60])
 
     # Per domande fattuali: prova prima Wikipedia API per contenuto ricco,
     # poi DuckDuckGo come fallback per snippet aggiuntivi.
     wiki_extract = None
-    if factual and not youtube:
+    results = []
+    if factual and not youtube and not music:
         wiki_extract = _fetch_wikipedia_extract(clean_q)
-        # P2-8: DDG senza prefisso "wikipedia" — query pulita; se wiki API
-        # ha già dato contenuto, DDG aggiunge solo fonti supplementari.
         results = web_search(clean_q, max_results=max_results, region="it-it")
         if not results:
             results = web_search(clean_q, max_results=max_results)
-    else:
+    elif music:
+        # Ricerca musicale multi-piattaforma:
+        # 1. YouTube (max 2 risultati) per il video
+        # 2. Generale senza YouTube per piattaforme diverse (Spotify, Genius...)
+        yt_results = web_search(
+            clean_q, max_results=2, youtube=True,
+        )
+        general_results = web_search(
+            clean_q, max_results=max_results, music=True,
+        )
+        # Unisci senza duplicati (stesso URL)
+        seen_urls: set = set()
+        for r in yt_results + general_results:
+            url = r.get("url", "")
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                results.append(r)
+        # Ordina per rilevanza musicale
+        results = _sort_music_results(results)
+        results = results[:max_results]
+    elif explicit or factual:
         results = web_search(clean_q, max_results=max_results, youtube=youtube)
-    if not results:
+
+    # Se né web né GitHub hanno prodotto risultati, ritorna None
+    has_github = github_data and (github_data.get("repos") or github_data.get("code"))
+    if not results and not has_github:
         return None
 
     urls = {r["url"] for r in results if r.get("url")}
+    # Aggiungi URL GitHub al set di URL consentiti
+    if has_github:
+        for r in github_data.get("repos", []):
+            if r.get("url"):
+                urls.add(r["url"])
+        for c in github_data.get("code", []):
+            if c.get("url"):
+                urls.add(c["url"])
 
     if explicit:
         # Modalità "links": risultati diretti, modello saltato
+        user_parts = []
+        if has_github:
+            user_parts.append(format_github_user(github_data, query=message))
+        if results:
+            web_fmt = format_search_results_user(results, query=message, music=music)
+            if has_github:
+                user_parts.append("\n**🌐 Web:**\n" + web_fmt)
+            else:
+                user_parts.append(web_fmt)
         return {
             "mode": "links",
-            "user": format_search_results_user(results, query=message),
+            "user": "\n".join(user_parts),
             "urls": urls,
         }
     else:
         # Modalità "augmented": contesto per il modello
+        context_parts = []
+        if has_github:
+            context_parts.append(format_github_context(github_data, query=message))
+        context_parts.append(
+            _format_augmented_context(
+                results, query=message, wiki_extract=wiki_extract,
+            )
+        )
         return {
             "mode": "augmented",
-            "context": _format_augmented_context(
-                results, query=message, wiki_extract=wiki_extract,
-            ),
+            "context": "\n\n".join(context_parts),
             "urls": urls,
         }
 

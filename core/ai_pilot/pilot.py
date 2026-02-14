@@ -48,9 +48,12 @@ class Pilot:
         self.cfg = PilotConfig(config_path=config_path)
 
         # P2-8 fix: lock per proteggere reload_config da richieste concorrenti
-        self._reload_lock = threading.Lock()
+        # P1-2 fix: process()/process_stream() acquisiscono lo stesso lock in lettura
+        #           per evitare che reload_config scambi sottosistemi mid-request
+        self._reload_lock = threading.RLock()
 
-        # P1-4 fix: contatore fatti estratti per turno
+        # P1-1 fix: lock + contatore fatti estratti per turno
+        self._fact_lock = threading.Lock()
         self._auto_fact_count = 0
 
         # 2. Inizializza sotto-sistemi con degradazione graceful
@@ -103,8 +106,9 @@ class Pilot:
 
         # Resetta limiti per-turno dei tool
         self.tools.reset_turn_limits()
-        # P1-4 fix: resetta contatore fatti auto-estratti
-        self._auto_fact_count = 0
+        # P1-1 fix: resetta contatore fatti auto-estratti sotto lock
+        with self._fact_lock:
+            self._auto_fact_count = 0
 
         memory_context = self.memory.retrieve(user_message) if user_message else ""
 
@@ -192,6 +196,12 @@ class Pilot:
         if not ai_engine:
             raise ValueError("ai_engine è richiesto per process()")
 
+        # P1-2 fix: cattura riferimenti ai sottosistemi sotto lock
+        # così un reload_config concorrente non li scambia mid-request
+        with self._reload_lock:
+            planner = self.planner
+            logger = self.logger
+
         system_prompt, available_tools, use_planning = self._prepare_turn(
             user_message, conv_id, extra_instructions
         )
@@ -203,7 +213,7 @@ class Pilot:
             "memory_retrieved": bool(system_prompt and system_prompt.strip()),
         }
 
-        if use_planning and isinstance(self.planner, ReActPlanner):
+        if use_planning and isinstance(planner, ReActPlanner):
             response, plan_meta = self._run_react_loop(
                 user_message, conversation_history, system_prompt, ai_engine,
                 model=model,
@@ -222,7 +232,7 @@ class Pilot:
         response = self._post_process(response)
 
         # Log turno assistente (sincrono — deve avvenire prima del return)
-        self.logger.log_conversation_turn(conv_id, "assistant", response, metadata)
+        logger.log_conversation_turn(conv_id, "assistant", response, metadata)
 
         # P0-1 fix: estrai fatti in thread separato (era sincrono, bloccava 2-5s)
         t = threading.Thread(
@@ -258,6 +268,11 @@ class Pilot:
         if not ai_engine:
             raise ValueError("ai_engine è richiesto per process_stream()")
 
+        # P1-2 fix: cattura riferimenti sotto lock
+        with self._reload_lock:
+            planner = self.planner
+            logger = self.logger
+
         system_prompt, available_tools, use_planning = self._prepare_turn(
             user_message, conv_id, extra_instructions
         )
@@ -266,7 +281,7 @@ class Pilot:
         # per garantire logging e fact extraction anche se il client disconnette.
         response = ""
         try:
-            if use_planning and isinstance(self.planner, ReActPlanner):
+            if use_planning and isinstance(planner, ReActPlanner):
                 # P1-4: streamma aggiornamenti intermedi del ciclo ReAct
                 for msg_type, content in self._run_react_loop_streaming(
                     user_message, conversation_history, system_prompt, ai_engine
@@ -299,7 +314,7 @@ class Pilot:
             # Garantito: logging + fact extraction sempre eseguiti
             try:
                 if response:
-                    self.logger.log_conversation_turn(conv_id, "assistant", response)
+                    logger.log_conversation_turn(conv_id, "assistant", response)
                 t = threading.Thread(
                     target=self._extract_and_store_facts,
                     args=(user_message, ai_engine),
@@ -523,10 +538,16 @@ class Pilot:
         Usa il modello per estrarre fatti memorizzabili dal messaggio utente.
         Eseguita in un thread separato per non bloccare la risposta.
         P1-4 fix: applica rate-limit anche ai fatti estratti automaticamente.
+        B8 perf-fix: attende 3s prima di usare la GPU, per non competere
+        con una eventuale nuova richiesta dell'utente.
         """
         # Messaggi troppo corti non contengono fatti
         if len(user_message) < 20:
             return
+
+        # B8 perf-fix: ritardo per evitare contesa GPU con la prossima risposta
+        import time
+        time.sleep(3)
 
         try:
             prompt = self.prompt_builder.build_entity_extraction_prompt(user_message)
@@ -545,19 +566,20 @@ class Pilot:
             facts = data.get("facts", [])
 
             for fact in facts:
-                # P1-4 fix: rate-limit fatti auto-estratti
-                if self._auto_fact_count >= _MAX_AUTO_FACTS_PER_TURN:
-                    self.logger.log_event("auto_fact_limit_reached", {
-                        "limit": _MAX_AUTO_FACTS_PER_TURN,
-                    }, level="debug")
-                    break
+                # P1-1 fix: rate-limit fatti auto-estratti (thread-safe)
+                with self._fact_lock:
+                    if self._auto_fact_count >= _MAX_AUTO_FACTS_PER_TURN:
+                        self.logger.log_event("auto_fact_limit_reached", {
+                            "limit": _MAX_AUTO_FACTS_PER_TURN,
+                        }, level="debug")
+                        break
 
-                key = fact.get("key", "").strip()
-                value = fact.get("value", "").strip()
-                if key and value:
-                    self.memory.add_fact(key, value, source="auto_extraction")
-                    self._auto_fact_count += 1
-                    self.logger.log_memory_op("add_fact", {"key": key, "value": value[:100]})
+                    key = fact.get("key", "").strip()
+                    value = fact.get("value", "").strip()
+                    if key and value:
+                        self.memory.add_fact(key, value, source="auto_extraction")
+                        self._auto_fact_count += 1
+                        self.logger.log_memory_op("add_fact", {"key": key, "value": value[:100]})
 
         except (json.JSONDecodeError, KeyError, TypeError):
             pass  # Estrazione fallita, non critico
@@ -641,7 +663,7 @@ class Pilot:
 
     def reload_config(self) -> None:
         """Ricarica la configurazione da disco e propaga ai subsystem.
-        P2-8 fix: protetto da lock per evitare race condition con richieste in-flight.
+        P1-2 fix: protetto da RLock per evitare race condition con richieste in-flight.
         """
         with self._reload_lock:
             self.cfg.reload()

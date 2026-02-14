@@ -44,14 +44,18 @@ class ContextManager:
     
     def compress_context(self, messages: List[Dict], ai_engine) -> List[Dict]:
         """
-        Comprime i messaggi vecchi mantenendo quelli piÃ¹ recenti
+        Comprime i messaggi vecchi mantenendo quelli più recenti.
+
+        B1 perf-fix: rimossa la summarizzazione sincrona con AI che bloccava
+        il thread per 5-30 secondi.  Ora usa troncamento semplice:
+        mantiene gli ultimi N messaggi entro il budget token.
         
         Args:
             messages: Lista completa dei messaggi
-            ai_engine: Engine AI per generare riassunti
+            ai_engine: Engine AI (non più usato, mantenuto per compatibilità)
             
         Returns:
-            Lista di messaggi compressa con riassunto iniziale
+            Lista di messaggi compressa
         """
         total_tokens = self.calculate_messages_tokens(messages)
         
@@ -59,76 +63,52 @@ class ContextManager:
         if total_tokens <= self.max_context_tokens:
             return messages
         
-        # Mantieni sempre gli ultimi N messaggi
-        recent_messages_count = 6  # Ultimi 3 scambi
-        recent_messages = messages[-recent_messages_count:]
-        old_messages = messages[:-recent_messages_count]
+        # ── Troncamento progressivo: mantieni quanti più messaggi recenti possibile ──
+        # Parti da tutti i messaggi e rimuovi i più vecchi finché non rientri nel budget.
+        # Mantieni SEMPRE almeno gli ultimi 2 messaggi (ultima coppia user/assistant).
+        truncated = list(messages)
+        while len(truncated) > 2:
+            truncated = truncated[1:]
+            if self.calculate_messages_tokens(truncated) <= self.max_context_tokens:
+                break
         
-        # Crea un riassunto dei messaggi vecchi
-        if old_messages:
-            summary = self._generate_summary(old_messages, ai_engine)
+        # Se abbiamo tagliato messaggi, aggiungi nota di contesto
+        n_dropped = len(messages) - len(truncated)
+        if n_dropped > 0:
+            # Costruisci riassunto veloce: prima riga di ogni messaggio tagliato
+            summary_lines = []
+            for msg in messages[:min(n_dropped, 6)]:
+                role = msg.get('role', '?').upper()
+                first_line = msg.get('content', '')[:80].split('\n')[0]
+                summary_lines.append(f"- {role}: {first_line}…")
+            summary_text = "\n".join(summary_lines)
+            if n_dropped > 6:
+                summary_text += f"\n- … e altri {n_dropped - 6} messaggi"
             
-            # Sostituisci i vecchi messaggi con il riassunto
-            compressed = [
-                {
-                    'role': 'system',
-                    'content': f"[RIASSUNTO CONVERSAZIONE PRECEDENTE]\n{summary}",
-                    'timestamp': datetime.now().isoformat(),
-                    'is_summary': True
-                }
-            ]
-            compressed.extend(recent_messages)
-            return compressed
+            truncated.insert(0, {
+                'role': 'system',
+                'content': (
+                    f"[CONTESTO: {n_dropped} messaggi precedenti omessi per limite contesto]\n"
+                    f"{summary_text}"
+                ),
+                'timestamp': datetime.now().isoformat(),
+                'is_summary': True,
+            })
         
-        # P1-2: Even with ≤6 messages, if over token limit, truncate content
-        # to fit within budget by trimming oldest messages
-        recent_tokens = self.calculate_messages_tokens(recent_messages)
-        if recent_tokens > self.max_context_tokens and len(recent_messages) > 2:
-            # Progressively drop oldest recent messages until under limit
-            while len(recent_messages) > 2:
-                recent_messages = recent_messages[1:]
-                if self.calculate_messages_tokens(recent_messages) <= self.max_context_tokens:
-                    break
-        
-        return recent_messages
+        return truncated
     
     def _generate_summary(self, messages: List[Dict], ai_engine) -> str:
-        """Genera un riassunto dei messaggi usando l'AI"""
+        """Genera un riassunto dei messaggi usando l'AI.
         
-        # Prepara il testo da riassumere (cap a 6000 chars per non superare
-        # la context window del modello)
-        _MAX_SUMMARY_INPUT = 6000
+        NOTA: Non più usato da compress_context() (B1 perf-fix).
+        Mantenuto per compatibilità API.
+        """
         parts = []
-        total_len = 0
-        for msg in messages:
-            line = f"{msg['role'].upper()}: {msg['content']}"
-            if total_len + len(line) > _MAX_SUMMARY_INPUT:
-                parts.append(f"[... {len(messages) - len(parts)} messaggi precedenti omessi ...]")
-                break
-            parts.append(line)
-            total_len += len(line)
-        conversation_text = "\n\n".join(parts)
-        
-        summary_prompt = f"""Riassumi questa conversazione in modo conciso ma completo, 
-mantenendo tutti i fatti importanti, nomi, date e informazioni chiave.
-Scrivi solo il riassunto, senza introduzioni.
-
-CONVERSAZIONE:
-{conversation_text}
-
-RIASSUNTO:"""
-        
-        try:
-            # Genera il riassunto
-            summary = ai_engine.generate_response(
-                prompt=summary_prompt,
-                conversation_history=None,
-                system_prompt="Sei un esperto nel creare riassunti concisi e informativi."
-            )
-            return summary
-        except Exception as e:
-            # Fallback: riassunto basico
-            return f"Conversazione con {len(messages)} messaggi scambiati su vari argomenti."
+        for msg in messages[:6]:
+            role = msg.get('role', '?').upper()
+            first_line = msg.get('content', '')[:120].split('\n')[0]
+            parts.append(f"- {role}: {first_line}")
+        return "\n".join(parts) or f"Conversazione con {len(messages)} messaggi."
 
 
 class EntityTracker:

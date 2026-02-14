@@ -164,8 +164,12 @@ class ModelRouter:
         with self._installed_cache_lock:
             if self._installed_cache is None:
                 return True  # Se non abbiamo la cache, assumiamo sia installato
-            model_lower = model.lower()
-            return any(model_lower in m for m in self._installed_cache)
+            model_lower = model.lower().split(":")[0]
+            for m in self._installed_cache:
+                m_base = m.split(":")[0]
+                if model_lower == m_base or model.lower() == m:
+                    return True
+            return False
 
     def route(
         self,

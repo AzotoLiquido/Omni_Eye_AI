@@ -86,6 +86,7 @@ class TestAIEngineBuildOpts(unittest.TestCase):
             self.eng.model = "test"
             self.eng.temperature = 0.7
             self.eng.max_tokens = 2048
+            self.eng.context_window = 8192
 
     def test_default_opts(self):
         opts = self.eng._build_opts()
@@ -112,6 +113,7 @@ class TestAIEngineAnalyzeDocTruncation(unittest.TestCase):
             self.eng.model = "test"
             self.eng.temperature = 0.7
             self.eng.max_tokens = 2048
+            self.eng.context_window = 8192
             self.eng.client.chat.return_value = {"message": {"content": "ok"}}
 
     def test_truncation_note_present(self):
@@ -140,6 +142,7 @@ class TestAIEngineChangeModelLock(unittest.TestCase):
             self.eng.model = "original"
             self.eng.temperature = 0.7
             self.eng.max_tokens = 2048
+            self.eng.context_window = 8192
 
     def test_rollback_on_unavailable(self):
         self.eng.client.list.side_effect = Exception("no model")
@@ -315,19 +318,19 @@ class TestEntityTracker(unittest.TestCase):
 
 
 class TestGenerateSummaryLimit(unittest.TestCase):
-    """P1-3: _generate_summary deve troncare l'input."""
+    """B1: _generate_summary ora usa troncamento semplice (non più AI)."""
 
     def test_summary_input_capped(self):
         cm = ContextManager()
         mock_engine = MagicMock()
-        mock_engine.generate_response.return_value = "riassunto"
         # 200 messaggi lunghi
         msgs = [{"role": "user", "content": "X" * 500} for _ in range(200)]
-        cm._generate_summary(msgs, mock_engine)
-        # Verifica che il prompt non contenga tutto il testo
-        call_args = mock_engine.generate_response.call_args
-        prompt = call_args[1]["prompt"] if "prompt" in (call_args[1] or {}) else call_args[0][0]
-        self.assertIn("omessi", prompt)
+        result = cm._generate_summary(msgs, mock_engine)
+        # Non deve chiamare l'AI (B1 perf-fix)
+        mock_engine.generate_response.assert_not_called()
+        # Deve produrre un riassunto testuale
+        self.assertIsInstance(result, str)
+        self.assertGreater(len(result), 0)
 
 
 class TestKnowledgeBase(unittest.TestCase):

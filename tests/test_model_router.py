@@ -74,7 +74,7 @@ class TestModelMapping(unittest.TestCase):
         self.assertEqual(m.get(Intent.VISION), "minicpm-v")
 
     def test_custom_mapping(self):
-        m = ModelMapping(general="llama3.1", code="codellama:7b", vision="moondream")
+        m = ModelMapping(general="llama3.1", code="codellama:7b", vision="minicpm-v")
         self.assertEqual(m.get(Intent.GENERAL), "llama3.1")
         self.assertEqual(m.get(Intent.CODE), "codellama:7b")
 

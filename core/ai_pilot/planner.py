@@ -170,7 +170,9 @@ class ReActPlanner:
             step.observation = result.output
         else:
             step.observation = f"ERRORE [{result.tool_id}]: {result.error}"
-        self.steps.append(step)
+        # P1-3 fix: proteggi mutazione di self.steps con lock
+        with self._lock:
+            self.steps.append(step)
 
         return step.observation, result.success
 

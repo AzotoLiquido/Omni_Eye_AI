@@ -40,6 +40,12 @@ class ConversationMemory:
     _CACHE_TTL = 2.0  # seconds
     _cache_lock = threading.Lock()  # Thread-safe cache access
     _MAX_MESSAGES = 500  # P2-3: cap messaggi per conversazione (class-level)
+
+    # ── Cache conversazione attiva in-memory ──────────────────────────
+    # Evita 2-3 letture disco ridondanti per ogni messaggio
+    _active_conv_cache: Dict[str, Dict] = {}  # conv_id → dati completi
+    _active_conv_lock = threading.Lock()
+    _ACTIVE_CACHE_MAX = 5  # max conversazioni in cache
     
     def __init__(self):
         """Inizializza il sistema di memoria"""
@@ -115,15 +121,19 @@ class ConversationMemory:
     
     def load_conversation(self, conv_id: str) -> Optional[Dict]:
         """
-        Carica una conversazione dal disco
+        Carica una conversazione dal disco (con cache in-memory).
         
-        Args:
-            conv_id: ID della conversazione
-            
-        Returns:
-            Dizionario con i dati della conversazione o None
+        La cache evita riletture ridondanti: in un singolo scambio
+        la conversazione viene caricata 2-3 volte (add_message,
+        get_smart_context, update_from_conversation).
         """
         _validate_conv_id(conv_id)
+
+        # Check cache first
+        with self._active_conv_lock:
+            if conv_id in self._active_conv_cache:
+                return self._active_conv_cache[conv_id]
+
         filepath = os.path.join(self.conversations_dir, f"{conv_id}.json")
         
         if not os.path.exists(filepath):
@@ -131,10 +141,27 @@ class ConversationMemory:
         
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                data = json.load(f)
+            # Popola cache
+            self._cache_conversation(conv_id, data)
+            return data
         except Exception as e:
             logger.error("Errore caricamento conversazione %s: %s", conv_id, e)
             return None
+
+    def _cache_conversation(self, conv_id: str, data: Dict) -> None:
+        """Aggiunge una conversazione alla cache in-memory (LRU semplice)."""
+        with self._active_conv_lock:
+            # Evict più vecchie se cache piena
+            if conv_id not in self._active_conv_cache and len(self._active_conv_cache) >= self._ACTIVE_CACHE_MAX:
+                oldest = next(iter(self._active_conv_cache))
+                del self._active_conv_cache[oldest]
+            self._active_conv_cache[conv_id] = data
+
+    def _invalidate_conv_cache(self, conv_id: str) -> None:
+        """Rimuove una conversazione dalla cache."""
+        with self._active_conv_lock:
+            self._active_conv_cache.pop(conv_id, None)
     
     def get_conversation_history(self, conv_id: str, limit: int = None) -> List[Dict]:
         """
@@ -216,8 +243,9 @@ class ConversationMemory:
         try:
             if os.path.exists(filepath):
                 os.remove(filepath)
+                self._invalidate_conv_cache(conv_id)
                 with ConversationMemory._cache_lock:
-                    ConversationMemory._conv_list_cache = None  # Invalidate cache
+                    ConversationMemory._conv_list_cache = None  # Invalidate list cache
                 return True
             return False
         except Exception as e:
@@ -243,7 +271,26 @@ class ConversationMemory:
         conversation['updated_at'] = datetime.now().isoformat()
         
         return self._save_conversation(conv_id, conversation)
-    
+    def clear_conversation(self, conv_id: str) -> bool:
+        """
+        Svuota i messaggi di una conversazione senza eliminarla.
+
+        Mantiene id, titolo e data creazione; resetta messaggi e updated_at.
+
+        Args:
+            conv_id: ID della conversazione
+
+        Returns:
+            True se l'operazione è riuscita
+        """
+        conversation = self.load_conversation(conv_id)
+        if not conversation:
+            return False
+
+        conversation['messages'] = []
+        conversation['updated_at'] = datetime.now().isoformat()
+
+        return self._save_conversation(conv_id, conversation)    
     def _save_conversation(self, conv_id: str, conversation: Dict) -> bool:
         """
         Salva una conversazione sul disco
@@ -264,8 +311,10 @@ class ConversationMemory:
             with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump(conversation, f, ensure_ascii=False, indent=2)
             os.replace(tmp_path, filepath)
+            # Aggiorna cache in-memory
+            self._cache_conversation(conv_id, conversation)
             with ConversationMemory._cache_lock:
-                ConversationMemory._conv_list_cache = None  # Invalidate cache
+                ConversationMemory._conv_list_cache = None  # Invalidate list cache
             return True
         except Exception as e:
             logger.error("Errore salvataggio conversazione %s: %s", conv_id, e)

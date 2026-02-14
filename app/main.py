@@ -34,6 +34,9 @@ import config
 # Regex per validazione ID conversazione (anti path-traversal)
 _SAFE_CONV_ID = _re.compile(r'^[a-zA-Z0-9_-]+$')
 
+# Regex per domande sull'identità (compilato una volta)
+_IDENTITY_RE = _re.compile(config.IDENTITY_PATTERNS, _re.IGNORECASE)
+
 # Lock per cambio modello thread-safe (P1-7)
 _model_lock = threading.Lock()
 
@@ -89,7 +92,7 @@ if _router_cfg.get('enabled', False):
     _models = _router_cfg.get('models', {})
     model_router = ModelRouter(
         mapping=ModelMapping(
-            general=_models.get('general', 'gemma2:9b'),
+            general=_models.get('general', 'gemma3:4b'),
             code=_models.get('code', 'qwen2.5-coder:7b'),
             vision=_models.get('vision', 'minicpm-v'),
         ),
@@ -107,6 +110,28 @@ else:
     model_router = None
     ROUTER_ENABLED = False
     logger.info("Model Router: DISATTIVATO (modello singolo: %s)", ai_engine.model)
+
+# ── Warmup: pre-carica il modello default in VRAM per eliminare il cold start ──
+def _warmup_model():
+    """Genera un singolo token silenziosamente per forzare il caricamento in VRAM."""
+    try:
+        model = ai_engine.model
+        logger.info("Warmup: caricamento %s in VRAM...", model)
+        import time as _t
+        _start = _t.perf_counter()
+        ai_engine.client.chat(
+            model=model,
+            messages=[{"role": "user", "content": "test"}],
+            options={"num_predict": 1},
+            keep_alive=ai_engine.KEEP_ALIVE,
+        )
+        _elapsed = _t.perf_counter() - _start
+        logger.info("Warmup completato: %s caricato in %.1fs", model, _elapsed)
+    except Exception as e:
+        logger.warning("Warmup fallito (non critico): %s", e)
+
+# Avvia warmup in background per non bloccare l'avvio del server
+threading.Thread(target=_warmup_model, daemon=True, name="model-warmup").start()
 
 # Inizializza AI-Pilot (orchestratore avanzato)
 try:
@@ -184,6 +209,15 @@ def api_chat():
     if not conv_id:
         conv_id = memory.create_new_conversation()
     
+    # ── Avvia web search in background MENTRE si carica la conversazione ──
+    # Salta web search per documenti caricati (il contenuto è locale)
+    _has_document = user_message.startswith('[Documento caricato:')
+    _ws_result = [None]
+    def _bg_search():
+        _ws_result[0] = search_and_format(user_message) if not _has_document else None
+    _ws_thread = threading.Thread(target=_bg_search, daemon=True)
+    _ws_thread.start()
+
     # Salva messaggio utente con estrazione entità
     memory.add_message_advanced(conv_id, 'user', user_message)
     
@@ -194,36 +228,14 @@ def api_chat():
     if history:
         history = history[:-1]
     
-    # ── Ricerca web automatica (se il messaggio lo richiede) ──
-    web_search_data_sync = search_and_format(user_message)
+    # ── Aspetta risultato web search (ormai completata in parallelo) ──
+    _ws_thread.join(timeout=10)
+    web_search_data_sync = _ws_result[0]
     
-    # Modalità "links": risultati diretti + breve commento AI
+    # Modalità "links": risultati diretti + frase di chiusura statica
     if web_search_data_sync and web_search_data_sync["mode"] == "links":
         user_results = web_search_data_sync["user"]
-        # Chiedi al modello un breve commento sui risultati
-        from core.web_search import format_search_results
-        ai_context = format_search_results(
-            [{"title": "", "url": "", "snippet": ""}],  # dummy, il prompt è fisso
-            query=user_message,
-        )
-        try:
-            comment = ai_engine.generate_response(
-                user_message,
-                conversation_history=history[-4:] if history else None,
-                system_prompt=(
-                    f"L'utente ha chiesto: \"{user_message}\"\n"
-                    f"I seguenti risultati reali sono già stati mostrati:\n{user_results}\n\n"
-                    "Scrivi un BREVE commento (2-3 frasi) che aiuti l'utente: "
-                    "indica quale risultato è più rilevante e perché. "
-                    "NON ripetere i link. NON inventare URL. NON dire che non puoi cercare."
-                ),
-            )
-            # Filtra URL inventati dal commento
-            from core.web_search import strip_hallucinated_urls
-            comment = strip_hallucinated_urls(comment, web_search_data_sync["urls"])
-            response = user_results + "\n\n---\n" + comment.strip()
-        except Exception:
-            response = user_results + "\n\n---\nRicerca effettuata, fammi sapere se ti serve altro."
+        response = user_results + "\nEcco i risultati trovati, fammi sapere se ti serve altro."
         memory.add_message_advanced(conv_id, 'assistant', response, extract_entities=False)
         return jsonify({
             'response': response,
@@ -232,18 +244,37 @@ def api_chat():
             'pilot_meta': None
         })
     
+    # Model routing: seleziona modello ottimale PRIMA di costruire il prompt
+    route_result = None
+    routed_model = None
+    _is_code_intent = False
+    if ROUTER_ENABLED and model_router:
+        route_result = model_router.route(user_message)
+        routed_model = route_result.model
+        _is_code_intent = (route_result.intent == Intent.CODE)
+        if route_result.is_swap:
+            logger.info("Router swap → %s (intent=%s)", routed_model, route_result.intent.value)
+
     # System prompt: Pilot (se attivo) oppure fallback config.py
-    # P2-1 fix: non costruire il prompt del Pilot qui — lo fa internamente
-    # process(). Passiamo web context + additional_context come extra_instructions.
+    # Iniezione identità: se l'utente chiede "chi sei", aggiungi il prompt
+    # identità. Altrimenti il nome non compare MAI nel system prompt.
+    identity_inject = ""
+    if _IDENTITY_RE.search(user_message):
+        identity_inject = config.IDENTITY_PROMPT + "\n"
+
     if PILOT_ENABLED and pilot:
-        pilot_extra = ""
+        pilot_extra = identity_inject
         if web_search_data_sync and web_search_data_sync["mode"] == "augmented":
-            pilot_extra = web_search_data_sync["context"] + "\n\n"
+            pilot_extra += web_search_data_sync["context"] + "\n\n"
         if additional_context:
             pilot_extra += additional_context
         system_prompt = None  # Pilot costruisce il suo internamente
     else:
-        system_prompt = config.SYSTEM_PROMPT
+        # Usa il prompt specializzato per codice se l'intent è CODE
+        base_prompt = config.CODE_SYSTEM_PROMPT if _is_code_intent else config.SYSTEM_PROMPT
+        system_prompt = base_prompt
+        if identity_inject:
+            system_prompt = identity_inject + system_prompt
         if additional_context:
             system_prompt = additional_context + "\n" + system_prompt
         # Modalità "augmented": inietta contesto web nel system prompt
@@ -252,14 +283,6 @@ def api_chat():
     
     # Genera risposta
     try:
-        # Model routing: seleziona modello ottimale per l'intento
-        route_result = None
-        routed_model = None
-        if ROUTER_ENABLED and model_router:
-            route_result = model_router.route(user_message)
-            routed_model = route_result.model
-            if route_result.is_swap:
-                logger.info("Router swap → %s (intent=%s)", routed_model, route_result.intent.value)
 
         if PILOT_ENABLED and pilot:
             response, meta = pilot.process(
@@ -360,6 +383,15 @@ def api_chat_stream():
     if not conv_id:
         conv_id = memory.create_new_conversation()
     
+    # ── Avvia web search in background MENTRE si carica la conversazione ──
+    # Salta web search per documenti caricati (il contenuto è locale)
+    _has_document = user_message.startswith('[Documento caricato:')
+    _ws_stream_result = [None]
+    def _bg_stream_search():
+        _ws_stream_result[0] = search_and_format(user_message) if not images and not _has_document else None
+    _ws_stream_thread = threading.Thread(target=_bg_stream_search, daemon=True)
+    _ws_stream_thread.start()
+
     # Salva messaggio utente con estrazione entità
     memory.add_message_advanced(conv_id, 'user', user_message)
     
@@ -380,40 +412,63 @@ def api_chat_stream():
     image_context_parts = image_context_parts[-3:]  # cap a 3 analisi più recenti
     image_memory = "\n".join(image_context_parts) if image_context_parts else ""
     
-    # ── Ricerca web automatica (se il messaggio lo richiede) ──
-    web_search_data = search_and_format(user_message) if not images else None
+    # ── Aspetta risultato web search (ormai completata in parallelo) ──
+    _ws_stream_thread.join(timeout=10)
+    web_search_data = _ws_stream_result[0]
     web_mode = web_search_data["mode"] if web_search_data else None
     
-    # System prompt + extra per Pilot
-    # P2-1 fix: non costruire il prompt del Pilot qui (lo fa process_stream).
-    # Passiamo image_memory + additional_context come extra_instructions.
-    if PILOT_ENABLED and pilot and not web_search_data:
-        pilot_extra_stream = ""
-        if image_memory:
-            pilot_extra_stream = image_memory + "\n"
-        if additional_context:
-            pilot_extra_stream += additional_context
-        system_prompt = None  # Pilot costruisce il suo internamente
-    else:
-        system_prompt = config.SYSTEM_PROMPT
-        if image_memory:
-            system_prompt = image_memory + "\n" + system_prompt
-        if additional_context:
-            system_prompt = additional_context + "\n" + system_prompt
-
-    # Modalità "augmented": inietta contesto web nel system prompt
-    if web_mode == "augmented":
-        system_prompt = web_search_data["context"] + "\n\n" + system_prompt
-
-    # Model routing per streaming
+    # Model routing: seleziona modello ottimale PRIMA di costruire il prompt
     stream_route = None
     stream_routed_model = None
+    _is_code_intent_stream = False
     if ROUTER_ENABLED and model_router:
         stream_route = model_router.route(user_message, has_images=bool(images))
         stream_routed_model = stream_route.model
+        _is_code_intent_stream = (stream_route.intent == Intent.CODE)
         if stream_route.is_swap:
             logger.info("Router stream swap → %s (intent=%s)",
                         stream_routed_model, stream_route.intent.value)
+
+    # System prompt + extra per Pilot
+    # Iniezione identità: solo se l'utente chiede "chi sei"
+    identity_inject_stream = ""
+    if _IDENTITY_RE.search(user_message):
+        identity_inject_stream = config.IDENTITY_PROMPT + "\n"
+
+    # Seleziona prompt base: CODE_SYSTEM_PROMPT per codice, SYSTEM_PROMPT per il resto
+    _base_stream = config.CODE_SYSTEM_PROMPT if _is_code_intent_stream else config.SYSTEM_PROMPT
+
+    if PILOT_ENABLED and pilot and not web_search_data:
+        pilot_extra_stream = identity_inject_stream
+        if image_memory:
+            pilot_extra_stream += image_memory + "\n"
+        if additional_context:
+            pilot_extra_stream += additional_context
+
+        # Se c'è image_memory ma no immagini allegate → follow-up immagine,
+        # serve un system_prompt perché bypassa il Pilot
+        if image_memory and not images:
+            system_prompt = _base_stream
+            if identity_inject_stream:
+                system_prompt += "\n" + identity_inject_stream
+            system_prompt += "\n" + image_memory
+            if additional_context:
+                system_prompt += "\n" + additional_context
+        else:
+            system_prompt = None  # Pilot costruisce il suo internamente
+    else:
+        # KV cache: system_prompt fisso PRIMA, contesto dinamico DOPO
+        system_prompt = _base_stream
+        if identity_inject_stream:
+            system_prompt += "\n" + identity_inject_stream
+        if image_memory:
+            system_prompt += "\n" + image_memory
+        if additional_context:
+            system_prompt += "\n" + additional_context
+
+    # Modalità "augmented": inietta contesto web nel system prompt
+    if web_mode == "augmented":
+        system_prompt += "\n\n" + web_search_data["context"]
     
     def generate():
         """Generator per lo streaming"""
@@ -421,34 +476,11 @@ def api_chat_stream():
         response_saved = False
         
         try:
-            # ── Web search: modalità "links" → risultati diretti + commento AI ──
+            # ── Web search: modalità "links" → risultati diretti, niente commento AI ──
             if web_mode == "links":
                 user_results = web_search_data["user"]
-                yield _sse_data(user_results + "\n\n---\n")
-                # Genera breve commento AI in streaming
-                try:
-                    comment_prompt = (
-                        f"L'utente ha chiesto: \"{user_message}\"\n"
-                        f"I seguenti risultati reali sono già stati mostrati:\n{user_results}\n\n"
-                        "Scrivi un BREVE commento (2-3 frasi) che aiuti l'utente: "
-                        "indica quale risultato è più rilevante e perché. "
-                        "NON ripetere i link. NON inventare URL. NON dire che non puoi cercare."
-                    )
-                    comment_buf = ""
-                    for chunk in ai_engine.generate_response_stream(
-                        user_message,
-                        conversation_history=clean_history[-4:] if clean_history else None,
-                        system_prompt=comment_prompt,
-                    ):
-                        comment_buf += chunk
-                        yield _sse_data(chunk)
-                    from core.web_search import strip_hallucinated_urls
-                    # Il commento è già stato streamato; salviamo la versione filtrata
-                    comment_clean = strip_hallucinated_urls(comment_buf, web_search_data["urls"])
-                    full_response = user_results + "\n\n---\n" + comment_clean
-                except Exception:
-                    full_response = user_results + "\n\n---\nRicerca effettuata, fammi sapere se ti serve altro."
-
+                full_response = user_results + "\nEcco i risultati trovati, fammi sapere se ti serve altro."
+                yield _sse_data(full_response)
                 memory.add_message_advanced(conv_id, 'assistant', full_response, extract_entities=False)
                 response_saved = True
                 yield f"event: end\ndata: {conv_id}\n\n"
@@ -463,6 +495,7 @@ def api_chat_stream():
                     conversation_history=clean_history,
                     system_prompt=system_prompt,
                     images=images,
+                    model=stream_routed_model,
                 ):
                     model_buf += chunk
                 from core.web_search import strip_hallucinated_urls
@@ -565,18 +598,16 @@ def api_chat_stream():
                     )
 
                     answer_prompt = (
-                        f"# Contesto\n"
                         f"L'utente ha inviato un'immagine. Un modello visivo l'ha analizzata "
-                        f"e ha prodotto questa descrizione:\n\n"
+                        f"e ha prodotto questa descrizione in inglese:\n\n"
                         f"---\n{image_description.strip()}\n---\n\n"
-                        f"# Domanda dell'utente\n\"{user_message}\"\n\n"
-                        f"# Istruzioni\n"
-                        f"1. Rispondi basandoti ESCLUSIVAMENTE sulla descrizione fornita.\n"
-                        f"2. NON inventare dettagli assenti dalla descrizione.\n"
-                        f"3. Se la descrizione non contiene informazioni sufficienti per "
-                        f"rispondere, dichiaralo esplicitamente.\n"
-                        f"4. Rispondi nella stessa lingua della domanda dell'utente.\n"
-                        f"5. Sii preciso e strutturato nella risposta."
+                        f"Domanda dell'utente: \"{user_message}\"\n\n"
+                        f"Rispondi in italiano descrivendo ci\u00f2 che c'\u00e8 nell'immagine "
+                        f"basandoti sulla descrizione. Traduci in modo naturale "
+                        f"(es. 'tongue out' = 'lingua fuori', non 'linguaggio fuori'). "
+                        f"Non inventare dettagli assenti. "
+                        f"Non ripetere la domanda dell'utente. "
+                        f"Sii descrittivo ma senza ripetizioni."
                     )
                     for chunk in ai_engine.generate_response_stream(
                         answer_prompt,
@@ -586,6 +617,22 @@ def api_chat_stream():
                     ):
                         full_response += chunk
                         yield _sse_data(chunk)
+
+            # ── Follow-up immagine: bypass Pilot per evitare knowledge base ──
+            elif image_memory and not images:
+                # L'utente sta chiedendo info su un'immagine analizzata in precedenza
+                # (es. "descrivi", "dimmi di più", "cos'altro vedi")
+                # Il contesto immagine è già nel system_prompt, usiamo il modello
+                # testo direttamente per evitare che il Pilot cerchi nella KB
+                logger.info("Image follow-up senza Pilot: '%s'", user_message[:50])
+                for chunk in ai_engine.generate_response_stream(
+                    user_message,
+                    conversation_history=clean_history,
+                    system_prompt=system_prompt,
+                    model=stream_routed_model,
+                ):
+                    full_response += chunk
+                    yield _sse_data(chunk)
 
             elif PILOT_ENABLED and pilot:
                 for chunk in pilot.process_stream(
@@ -674,6 +721,20 @@ def api_delete_conversation(conv_id):
         return jsonify({'success': True})
     else:
         return jsonify({'error': 'Impossibile eliminare'}), 404
+
+
+@app.route('/api/conversations/<conv_id>/clear', methods=['POST'])
+@limiter.limit(config.RATE_LIMIT_CONFIG['limits']['conversations'])
+def api_clear_conversation(conv_id):
+    """Svuota i messaggi di una conversazione senza eliminarla"""
+    if not _SAFE_CONV_ID.match(conv_id):
+        return jsonify({'error': 'ID conversazione non valido'}), 400
+    success = memory.clear_conversation(conv_id)
+
+    if success:
+        return jsonify({'success': True})
+    else:
+        return jsonify({'error': 'Conversazione non trovata'}), 404
 
 
 @app.route('/api/conversations/new', methods=['POST'])

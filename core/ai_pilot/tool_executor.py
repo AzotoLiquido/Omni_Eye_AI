@@ -156,8 +156,9 @@ class ToolExecutor:
         "math", "random", "string", "json", "re", "datetime", "collections",
         "itertools", "functools", "operator", "decimal", "fractions",
         "statistics", "textwrap", "unicodedata", "enum", "dataclasses",
-        "typing", "copy", "pprint", "io", "csv", "hashlib", "hmac",
+        "typing", "copy", "pprint", "csv", "hashlib", "hmac",
         "base64", "binascii", "struct", "codecs", "difflib",
+        # NOTA: 'io' rimosso — io.open() bypassa il blocco di open()
     })
 
     # P1-2 fix: frozenset a livello di classe (non ri-allocato per ogni nodo AST)
@@ -199,6 +200,9 @@ class ToolExecutor:
                 if isinstance(func, ast.Name) and func.id in (
                     "exec", "eval", "__import__", "compile", "breakpoint",
                     "globals", "locals",
+                    # P0-1 fix: blocca builtin che bypassano la sandbox
+                    "open", "getattr", "setattr", "delattr",
+                    "vars", "dir", "input", "help", "memoryview",
                 ):
                     return f"Funzione non consentita: {func.id}()"
                 if isinstance(func, ast.Attribute) and func.attr in (

@@ -4,6 +4,7 @@ Motore AI - Gestisce l'interazione con Ollama
 
 import logging
 import threading
+import time
 import ollama
 from typing import List, Dict, Generator
 import config
@@ -56,6 +57,9 @@ class AIEngine:
     REPEAT_LAST_N = 128          # finestra di contesto per la penalità
     VISION_MAX_TOKENS = 1024     # cap dedicato per evitare loop nei modelli vision
 
+    # ── Performance: keep_alive lungo per evitare cold-start (default Ollama = 5m) ──
+    KEEP_ALIVE = "30m"           # mantieni modello in VRAM per 30 minuti
+
     def __init__(self, model: str = None):
         """
         Inizializza il motore AI
@@ -68,6 +72,7 @@ class AIEngine:
         self.model = model or config.AI_CONFIG['model']
         self.temperature = config.AI_CONFIG['temperature']
         self.max_tokens = config.AI_CONFIG['max_tokens']
+        self.context_window = config.AI_CONFIG['context_window']
         
     def check_ollama_available(self) -> bool:
         """Verifica se Ollama è disponibile e in esecuzione"""
@@ -102,17 +107,34 @@ class AIEngine:
         self,
         images: List[str] = None,
         *,
+        model: str = None,
         temperature: float = None,
         max_tokens: int = None,
     ) -> dict:
-        """Costruisce le opzioni Ollama per una singola richiesta (thread-safe)."""
-        temp = temperature if temperature is not None else self.temperature
-        tokens = max_tokens if max_tokens is not None else self.max_tokens
+        """Costruisce le opzioni Ollama usando il profilo per-modello (thread-safe).
+
+        Cerca in config.MODEL_PROFILES il profilo ottimizzato per il modello.
+        Se non trovato, usa il profilo '_default'.
+        """
+        use_model = model or self.model
+        profile = config.MODEL_PROFILES.get(
+            use_model, config.MODEL_PROFILES.get('_default', {})
+        )
+
+        temp = temperature if temperature is not None else profile.get('temperature', self.temperature)
+        tokens = max_tokens if max_tokens is not None else profile.get('num_predict', self.max_tokens)
+
         opts = {
             'temperature': temp,
             'num_predict': tokens,
-            'repeat_penalty': self.REPEAT_PENALTY,
-            'repeat_last_n': self.REPEAT_LAST_N,
+            'num_ctx': profile.get('num_ctx', self.context_window),
+            'repeat_penalty': profile.get('repeat_penalty', self.REPEAT_PENALTY),
+            'repeat_last_n': profile.get('repeat_last_n', self.REPEAT_LAST_N),
+            'num_thread': profile.get('num_thread', 6),
+            'num_batch': profile.get('num_batch', 512),
+            'num_gpu': profile.get('num_gpu', -1),
+            'top_k': profile.get('top_k', 40),
+            'top_p': profile.get('top_p', 0.9),
         }
         if images:
             opts['num_predict'] = min(opts['num_predict'], self.VISION_MAX_TOKENS)
@@ -124,13 +146,21 @@ class AIEngine:
         conversation_history: List[Dict] = None,
         system_prompt: str = None,
         images: List[str] = None,
+        *,
+        model: str = None,
     ) -> List[Dict]:
-        """Costruisce la lista messaggi per Ollama (DRY, usato da sync e stream)."""
+        """Costruisce la lista messaggi per Ollama (DRY, usato da sync e stream).
+
+        Se il modello è in BAKED_PROMPT_MODELS, il system prompt viene omesso
+        perché già integrato nel Modelfile (risparmio ~300 token/richiesta).
+        """
         messages: List[Dict] = []
-        messages.append({
-            'role': 'system',
-            'content': system_prompt or config.SYSTEM_PROMPT,
-        })
+        # Skip system prompt per modelli con prompt integrato nel Modelfile
+        if not (model and model in config.BAKED_PROMPT_MODELS):
+            messages.append({
+                'role': 'system',
+                'content': system_prompt or config.SYSTEM_PROMPT,
+            })
         if conversation_history:
             messages.extend(conversation_history)
         user_msg: Dict = {'role': 'user', 'content': prompt}
@@ -167,12 +197,14 @@ class AIEngine:
             use_model = model or self.model
             messages = self._build_messages(
                 prompt, conversation_history, system_prompt, images,
+                model=use_model,
             )
 
             response = self.client.chat(
                 model=use_model,
                 messages=messages,
-                options=self._build_opts(images, temperature=temperature),
+                options=self._build_opts(images, model=use_model, temperature=temperature),
+                keep_alive=self.KEEP_ALIVE,
             )
             
             return response['message']['content']
@@ -209,19 +241,22 @@ class AIEngine:
             use_model = model or self.model
             messages = self._build_messages(
                 prompt, conversation_history, system_prompt, images,
+                model=use_model,
             )
 
             stream = self.client.chat(
                 model=use_model,
                 messages=messages,
                 stream=True,
-                options=self._build_opts(images, temperature=temperature),
+                options=self._build_opts(images, model=use_model, temperature=temperature),
+                keep_alive=self.KEEP_ALIVE,
             )
 
             # Rilevamento ripetizioni in tempo reale (controlla ogni N token)
             running_text = ""
             _check_interval = 20   # controlla ogni N token, non ad ogni singolo
             _token_count = 0
+            _stream_start = time.perf_counter()
             for chunk in stream:
                 if 'message' in chunk and 'content' in chunk['message']:
                     token = chunk['message']['content']
@@ -240,6 +275,15 @@ class AIEngine:
                         return
 
                     yield token
+
+            # Performance logging: tokens/sec
+            _elapsed = time.perf_counter() - _stream_start
+            if _elapsed > 0 and _token_count > 0:
+                _tps = _token_count / _elapsed
+                logger.info(
+                    "[perf] %s: %d tok in %.1fs (%.1f tok/s)",
+                    use_model, _token_count, _elapsed, _tps,
+                )
                     
         except Exception as e:
             logger.error("Errore streaming risposta: %s", e)

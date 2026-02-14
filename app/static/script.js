@@ -505,9 +505,14 @@ function prepareUIForSending() {
         welcomeMsg.style.display = 'none';
     }
 
-    // Nascondi quick prompts panel (P1-5: was quickPromptsWrapper)
+    // Nascondi quick prompts panel: usa la classe CSS, non inline style
     const qpw = document.getElementById('quickPrompts');
-    if (qpw) qpw.style.display = 'none';
+    if (qpw) qpw.classList.remove('expanded');
+    const qpToggleBtn = document.getElementById('quickPromptsToggle');
+    if (qpToggleBtn) {
+        qpToggleBtn.classList.remove('active');
+        qpToggleBtn.setAttribute('aria-expanded', 'false');
+    }
 }
 
 /**
@@ -610,6 +615,7 @@ async function handleStreamResponse(response, contentDiv) {
     if (fullResponse) {
         contentDiv.classList.add('markdown-body');
         contentDiv.innerHTML = renderMarkdown(fullResponse);
+        enhanceCodeBlocks(contentDiv);
     }
 }
 
@@ -623,6 +629,10 @@ async function sendMessage() {
     
     // Step 1: Validazione - serve almeno testo o immagine
     if (!message && images.length === 0) return;
+    
+    // P1-4 fix: guard contro double-send (click rapidi / Enter multipli)
+    if (App.state.isProcessing) return;
+    App.state.isProcessing = true;
     
     // Step 2: Prepara UI
     prepareUIForSending();
@@ -709,6 +719,7 @@ Domanda utente: ${requestBody.message}`;
         showNotification('❌ Errore nell\'invio del messaggio', 'error');
     } finally {
         // Step 11: Ripristina UI
+        App.state.isProcessing = false;
         App.state.currentAbortController = null;
         restoreUIAfterSending();
     }
@@ -761,6 +772,7 @@ function createMessageElement(role, content, images = []) {
             const mdDiv = document.createElement('div');
             mdDiv.className = 'markdown-body';
             mdDiv.innerHTML = renderMarkdown(content);
+            enhanceCodeBlocks(mdDiv);
             contentDiv.appendChild(mdDiv);
         } else {
             const textNode = document.createElement('span');
@@ -906,7 +918,12 @@ async function loadConversation(convId) {
             showWelcomeMessage('💬 Conversazione vuota', 'Nessun messaggio salvato in questa chat');
         } else {
             const qpw = document.getElementById('quickPrompts');
-            if (qpw) qpw.style.display = 'none';
+            if (qpw) qpw.classList.remove('expanded');
+            const qpToggleBtn = document.getElementById('quickPromptsToggle');
+            if (qpToggleBtn) {
+                qpToggleBtn.classList.remove('active');
+                qpToggleBtn.setAttribute('aria-expanded', 'false');
+            }
         }
 
         startGridOrb();
@@ -973,11 +990,27 @@ async function createNewConversation() {
 }
 
 // Pulisci chat corrente
-function clearCurrentChat() {
+async function clearCurrentChat() {
     if (!App.state.currentConversationId) return;
     
-    if (confirm('Vuoi iniziare una nuova conversazione?')) {
-        createNewConversation();
+    if (!confirm('Vuoi svuotare questa conversazione? I messaggi verranno eliminati.')) return;
+
+    try {
+        const response = await fetch(
+            `${API_BASE}/conversations/${App.state.currentConversationId}/clear`,
+            { method: 'POST', headers: { 'Content-Type': 'application/json' } }
+        );
+
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+        // Svuota la UI
+        elements.messagesContainer.innerHTML = '';
+        showWelcomeMessage('💬 Chat pulita', 'Conversazione svuotata. Inizia a chattare!');
+        startGridOrb();
+        showNotification('✅ Chat pulita', 'success');
+    } catch (error) {
+        console.error('❌ Errore pulizia chat:', error);
+        showNotification('❌ Errore pulizia chat', 'error');
     }
 }
 
@@ -1211,6 +1244,22 @@ function escapeHTML(str) {
 }
 
 /**
+ * Configura marked.js (una sola volta).
+ * In marked v15 l'opzione 'highlight' è stata rimossa.
+ * La syntax highlighting viene applicata post-render in enhanceCodeBlocks().
+ */
+let _markedConfigured = false;
+function _configureMarked() {
+    if (_markedConfigured) return;
+    if (typeof marked === 'undefined') return;
+    marked.setOptions({
+        breaks: true,
+        gfm: true
+    });
+    _markedConfigured = true;
+}
+
+/**
  * Renderizza testo Markdown in HTML sicuro.
  * Richiede marked.js e DOMPurify caricati via CDN.
  * Fallback a textContent se le librerie non sono pronte.
@@ -1218,12 +1267,59 @@ function escapeHTML(str) {
 function renderMarkdown(text) {
     if (!text) return '';
     if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
+        _configureMarked();
         const html = marked.parse(text, { breaks: true, gfm: true });
-        return DOMPurify.sanitize(html);
+        const clean = DOMPurify.sanitize(html, {
+            ADD_ATTR: ['class'],  // preserve hljs classes
+        });
+        return clean;
     }
     // Fallback: escape HTML (CDN non caricato)
     console.warn('renderMarkdown: marked/DOMPurify non disponibili, fallback a escapeHTML');
     return escapeHTML(text);
+}
+
+/**
+ * Aggiunge header con lingua + bottone copia a tutti i blocchi <pre><code>.
+ * Da chiamare dopo aver inserito HTML renderizzato nel DOM.
+ */
+function enhanceCodeBlocks(container) {
+    if (!container) return;
+    container.querySelectorAll('pre > code').forEach(codeEl => {
+        const pre = codeEl.parentElement;
+        if (pre.dataset.enhanced) return;  // già processato
+        pre.dataset.enhanced = 'true';
+
+        // Applica syntax highlighting con hljs (post-render)
+        if (typeof hljs !== 'undefined') {
+            try { hljs.highlightElement(codeEl); } catch (_) { /* fallback */ }
+        }
+
+        // Rileva linguaggio dalla classe hljs (es. 'language-python' o 'hljs language-python')
+        let lang = '';
+        for (const cls of codeEl.classList) {
+            if (cls.startsWith('language-')) { lang = cls.replace('language-', ''); break; }
+        }
+
+        // Crea header bar
+        const header = document.createElement('div');
+        header.className = 'code-header';
+        header.innerHTML = `
+            <span class="code-lang">${escapeHTML(lang || 'code')}</span>
+            <button class="code-copy-btn" title="Copia codice">Copia</button>
+        `;
+        pre.insertBefore(header, codeEl);
+
+        // Click handler per copia
+        header.querySelector('.code-copy-btn').addEventListener('click', () => {
+            const code = codeEl.textContent;
+            navigator.clipboard.writeText(code).then(() => {
+                const btn = header.querySelector('.code-copy-btn');
+                btn.textContent = 'Copiato ✓';
+                setTimeout(() => { btn.textContent = 'Copia'; }, 2000);
+            });
+        });
+    });
 }
 
 /**
@@ -1238,7 +1334,15 @@ function showWelcomeMessage(title, subtitle) {
             <p>${escapeHTML(subtitle)}</p>
         </div>`;
     const qpw = document.getElementById('quickPrompts');
-    if (qpw) qpw.style.display = '';
+    if (qpw) {
+        qpw.style.display = '';
+        qpw.classList.add('expanded');
+    }
+    const qpToggleBtn = document.getElementById('quickPromptsToggle');
+    if (qpToggleBtn) {
+        qpToggleBtn.classList.add('active');
+        qpToggleBtn.setAttribute('aria-expanded', 'true');
+    }
 }
 
 // Sistema di notifiche toast

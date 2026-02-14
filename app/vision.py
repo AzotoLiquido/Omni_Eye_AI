@@ -10,33 +10,33 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Modelli usati solo come backend per vision; nascosti dalla selezione utente
-VISION_ONLY_TAGS = ('moondream', 'bakllava', 'minicpm-v')
+VISION_ONLY_TAGS = ('bakllava', 'minicpm-v')
 
 # Modelli vision multilingue: possono rispondere direttamente in qualsiasi lingua
 # → pipeline singola (no fase intermedia in inglese)
-MULTILINGUAL_VISION = ('minicpm-v', 'llava:13b', 'llava-llama3')
+MULTILINGUAL_VISION = ('llava:13b', 'llava-llama3')
 
 # Modelli vision EN-only: descrivono solo in inglese
 # → pipeline a 2 fasi (descrizione EN + risposta IT via modello testo)
-EN_ONLY_VISION = ('moondream', 'bakllava', 'llava-phi3', 'llava:7b', 'llava')
+# NOTA: minicpm-v produce italiano impreciso (errori lessicali, ripetizioni)
+#       quindi usa la pipeline 2-fasi per qualità migliore
+EN_ONLY_VISION = ('minicpm-v', 'bakllava', 'llava-phi3', 'llava:7b', 'llava')
 
 # Ordine di priorità modelli vision (il primo disponibile viene usato)
 VISION_PRIORITY = ('minicpm-v', 'llava:13b', 'llava-llama3', 'llava:7b',
-                   'llava', 'moondream', 'bakllava', 'vision')
+                   'llava', 'bakllava', 'vision')
 
 # System prompt condiviso per analisi visiva (module-level, non ricostruito ad ogni request)
 VISION_SYSTEM_PROMPT = (
-    "# Ruolo\n"
-    "Sei un analista visivo esperto. Il tuo compito è analizzare immagini "
-    "con la massima precisione possibile.\n\n"
-    "# Istruzioni\n"
-    "1. Descrivi ESATTAMENTE ciò che vedi, senza inventare dettagli.\n"
-    "2. Se c'è testo visibile, trascrivilo fedelmente.\n"
-    "3. Specifica posizioni spaziali (in alto, a sinistra, sullo sfondo...).\n"
-    "4. Distingui ciò che è certo da ciò che è incerto (\"sembra\", \"potrebbe\").\n"
-    "5. Rispondi nella lingua dell'utente.\n"
-    "6. NON aggiungere informazioni che non derivano dall'immagine.\n"
-    "7. Sii conciso ma completo. Non ripetere le stesse informazioni."
+    "You are a precise image analyst.\n\n"
+    "RULES:\n"
+    "1. Describe ONLY what you see. Never invent or assume details.\n"
+    "2. Be thorough: describe colors, textures, positions, expressions, background.\n"
+    "3. Use consistent terminology: pick ONE word for each object and stick with it.\n"
+    "4. If text is visible, transcribe it exactly.\n"
+    "5. Note spatial positions (top, left, background...).\n"
+    "6. Distinguish certain from uncertain (\"appears to be\", \"likely\").\n"
+    "7. Do NOT describe what is NOT in the image."
 )
 
 
